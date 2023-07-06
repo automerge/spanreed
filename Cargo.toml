@@ -11,7 +11,7 @@ path = "examples/tcp_example.rs"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-automerge = { version = "0.4.1" }
+automerge = { version = "0.5.0" }
 uuid = { version = "1.2.2"}
 crossbeam-channel = { version = "0.5.8" }
 parking_lot = { version = "0.12.1" }
