@@ -17,3 +17,14 @@ Project goal: add an integration layer between automerge and client code, compat
    - `curl --json '{document-id}' 0.0.0.0:3002/request_doc`(document id argument should look like`'"f9b1a2c6-ca05-4fc7-a02f-7e3d83f1bb49"'`)
 5. Presss ctr-c at every terminal tab.
 6. A successful run will print out the expected synced documents. 
+
+### Distributed Bakery Algorithm
+1. Start the server:
+   - `cargo run --example distributed-bakery -- --tcp-run-ip 127.0.0.1:2345 --http-run-ip 0.0.0.0:3001 --customer-id "1"`
+2. Start two clients:
+   - `cargo run --example distributed-bakery -- --other-ip 127.0.0.1:2345 --get-doc-ip 0.0.0.0:3001 --http-run-ip 0.0.0.0:3002 customer-id "2"`
+   - `cargo run --example distributed-bakery -- --other-ip 127.0.0.1:2345 --get-doc-ip 0.0.0.0:3001 --http-run-ip 0.0.0.0:3003 customer-id "3"`
+3. Watch the server enter its critical section(printed out).
+4. Tell a peer to increment a number: 
+   - `curl 0.0.0.0:3001/increment`
+5. Repeat.
