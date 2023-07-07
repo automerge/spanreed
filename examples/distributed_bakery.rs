@@ -34,13 +34,18 @@ async fn get_doc_id(State(state): State<Arc<AppState>>) -> Json<DocumentId> {
     Json(state.doc_handle.document_id())
 }
 
-async fn increment(State(state): State<Arc<AppState>>) {
+async fn increment(State(state): State<Arc<AppState>>) -> Json<u32> {
     // Enter the critical section.
     run_bakery_algorithm(state.doc_handle.clone(), state.customer_id.clone()).await;
+
+    // Increment the output
+    let output = increment_output(state.doc_handle.clone(), state.customer_id.clone()).await;
 
     // Exit the criticala section.
     start_outside_the_bakery(state.doc_handle.clone(), state.customer_id.clone()).await;
     println!("Exited CS");
+
+    Json(output)
 }
 
 #[derive(Debug, Clone, Reconcile, Hydrate, PartialEq)]
@@ -52,11 +57,53 @@ struct Customer {
 #[derive(Default, Debug, Clone, Reconcile, Hydrate, PartialEq)]
 struct Bakery {
     pub customers: HashMap<String, Customer>,
+    pub output: u32,
+    pub output_seen: HashMap<String, u32>,
+}
+
+async fn increment_output(doc_handle: DocHandle, customer_id: String) -> u32 {
+    let mut changed = doc_handle.changed();
+    let latest = doc_handle.with_doc_mut(|doc| {
+        let mut bakery: Bakery = hydrate(doc).unwrap();
+        bakery.output += 1;
+        bakery
+            .output_seen
+            .insert(customer_id.clone(), bakery.output);
+        let mut tx = doc.transaction();
+        reconcile(&mut tx, &bakery).unwrap();
+        tx.commit();
+        bakery.output
+    });
+    // Wait for all peers to have acknowlegded the new output.
+    loop {
+        if changed.await.is_err() {
+            // Shutdown.
+            break;
+        }
+        changed = doc_handle.changed();
+        let acked_by_all = doc_handle.with_doc(|doc| {
+            let bakery: Bakery = hydrate(doc).unwrap();
+            bakery.output_seen.values().fold(
+                true,
+                |acc, output| {
+                    if !acc {
+                        acc
+                    } else {
+                        output == &latest
+                    }
+                },
+            )
+        });
+        if acked_by_all {
+            break;
+        }
+    }
+    latest
 }
 
 async fn run_bakery_algorithm(doc_handle: DocHandle, customer_id: String) {
     let mut changed = doc_handle.changed();
-    doc_handle.with_doc_mut(|doc| {
+    let our_number = doc_handle.with_doc_mut(|doc| {
         // Pick a number that is higher than all others.
         let mut bakery: Bakery = hydrate(doc).unwrap();
         let customers_with_number = bakery
@@ -65,18 +112,15 @@ async fn run_bakery_algorithm(doc_handle: DocHandle, customer_id: String) {
             .iter()
             .map(|(id, c)| (id.clone(), c.number))
             .collect();
-        let highest_number = bakery
-            .customers
-            .values()
-            .map(|c| c.number)
-            .max()
-            .unwrap();
+        let highest_number = bakery.customers.values().map(|c| c.number).max().unwrap();
+        let our_number = highest_number + 1;
         let our_info = bakery.customers.get_mut(&customer_id).unwrap();
         our_info.views_of_others = customers_with_number;
-        our_info.number = highest_number + 1;
+        our_info.number = our_number;
         let mut tx = doc.transaction();
         reconcile(&mut tx, &bakery).unwrap();
         tx.commit();
+        our_number
     });
 
     loop {
@@ -86,26 +130,7 @@ async fn run_bakery_algorithm(doc_handle: DocHandle, customer_id: String) {
         }
         changed = doc_handle.changed();
         let entered_cs = doc_handle.with_doc_mut(|doc| {
-            let mut bakery: Bakery = hydrate(doc).unwrap();
-
-            let our_number = {
-                let customers_with_number = bakery
-                    .customers
-                    .clone()
-                    .iter()
-                    .map(|(id, c)| (id.clone(), c.number))
-                    .collect();
-                let number = {
-                    let our_info = bakery.customers.get_mut(&customer_id).unwrap();
-                    // Ack changes made by others.
-                    our_info.views_of_others = customers_with_number;
-                    our_info.number
-                };
-                let mut tx = doc.transaction();
-                reconcile(&mut tx, &bakery).unwrap();
-                tx.commit();
-                number
-            };
+            let bakery: Bakery = hydrate(doc).unwrap();
 
             // Wait for all peers to have acknowlegded our number.
             let acked_by_all = bakery
@@ -180,6 +205,12 @@ async fn acknowlegde_changes(doc_handle: DocHandle, customer_id: String) {
                 let our_info = bakery.customers.get_mut(&customer_id).unwrap();
                 // Ack changes made by others.
                 our_info.views_of_others = customers_with_number;
+
+                // Ack any new output.
+                bakery
+                    .output_seen
+                    .insert(customer_id.clone(), bakery.output);
+
                 let mut tx = doc.transaction();
                 reconcile(&mut tx, &bakery).unwrap();
                 tx.commit();
@@ -234,7 +265,7 @@ async fn main() {
     let http_ip = args.http_run_ip;
     let other_ip = args.other_ip;
     let get_doc_ip = args.get_doc_ip;
-    
+
     // Hardcoded customer Ids.
     let customers = vec!["1", "2", "3"];
 
@@ -262,16 +293,22 @@ async fn main() {
         });
 
         // The initial bakery.
-        let mut bakery: Bakery = Default::default();
+        let mut bakery: Bakery = Bakery {
+            output: 0,
+            ..Default::default()
+        };
+        bakery.output = 0;
         for customer_id in customers.clone() {
             let customer = Customer {
                 number: 0,
-                views_of_others: customers.clone()
+                views_of_others: customers
+                    .clone()
                     .into_iter()
                     .map(|id| (id.to_string(), 0))
                     .collect(),
             };
             bakery.customers.insert(customer_id.to_string(), customer);
+            bakery.output_seen.insert(customer_id.to_string(), 0);
         }
 
         // Create the initial document.
@@ -314,7 +351,7 @@ async fn main() {
 
     // Start the algorithm "outside the bakery".
     start_outside_the_bakery(doc_handle.clone(), args.customer_id.clone()).await;
-    
+
     // A task that continuously acknowledges changes made by others.
     acknowlegde_changes(doc_handle.clone(), args.customer_id.clone()).await;
 
