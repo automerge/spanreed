@@ -115,9 +115,14 @@ impl DocHandle {
     /// and only resolve the future when there was an actual change.
     pub fn changed(&self) -> RepoFuture<Result<(), RepoError>> {
         let (fut, observer) = new_repo_future_with_resolver();
+        let current_heads = {
+            let state = self.shared_document.read();
+            state.automerge.get_heads()
+        };
         self.repo_sender
             .send(RepoEvent::AddChangeObserver(
                 self.document_id.clone(),
+                current_heads,
                 observer,
             ))
             .expect("Failed to send doc change event.");

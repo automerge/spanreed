@@ -37,9 +37,11 @@ async fn get_doc_id(State(state): State<Arc<AppState>>) -> Json<DocumentId> {
 async fn increment(State(state): State<Arc<AppState>>) -> Json<u32> {
     // Enter the critical section.
     run_bakery_algorithm(state.doc_handle.clone(), state.customer_id.clone()).await;
+    println!("Entered critical section.");
 
     // Increment the output
     let output = increment_output(state.doc_handle.clone(), state.customer_id.clone()).await;
+    println!("Incremented output to {:?}.", output);
 
     // Exit the criticala section.
     start_outside_the_bakery(state.doc_handle.clone(), state.customer_id.clone()).await;
@@ -62,7 +64,6 @@ struct Bakery {
 }
 
 async fn increment_output(doc_handle: DocHandle, customer_id: String) -> u32 {
-    let mut changed = doc_handle.changed();
     let latest = doc_handle.with_doc_mut(|doc| {
         let mut bakery: Bakery = hydrate(doc).unwrap();
         bakery.output += 1;
@@ -76,11 +77,10 @@ async fn increment_output(doc_handle: DocHandle, customer_id: String) -> u32 {
     });
     // Wait for all peers to have acknowlegded the new output.
     loop {
-        if changed.await.is_err() {
+        if doc_handle.changed().await.is_err() {
             // Shutdown.
             break;
         }
-        changed = doc_handle.changed();
         let acked_by_all = doc_handle.with_doc(|doc| {
             let bakery: Bakery = hydrate(doc).unwrap();
             bakery.output_seen.values().fold(
@@ -102,7 +102,6 @@ async fn increment_output(doc_handle: DocHandle, customer_id: String) -> u32 {
 }
 
 async fn run_bakery_algorithm(doc_handle: DocHandle, customer_id: String) {
-    let mut changed = doc_handle.changed();
     let our_number = doc_handle.with_doc_mut(|doc| {
         // Pick a number that is higher than all others.
         let mut bakery: Bakery = hydrate(doc).unwrap();
@@ -124,12 +123,11 @@ async fn run_bakery_algorithm(doc_handle: DocHandle, customer_id: String) {
     });
 
     loop {
-        if changed.await.is_err() {
+        if doc_handle.changed().await.is_err() {
             // Shutdown.
-            return;
+            break;
         }
-        changed = doc_handle.changed();
-        let entered_cs = doc_handle.with_doc_mut(|doc| {
+        let entered_cs = doc_handle.with_doc(|doc| {
             let bakery: Bakery = hydrate(doc).unwrap();
 
             // Wait for all peers to have acknowlegded our number.
@@ -178,7 +176,6 @@ async fn run_bakery_algorithm(doc_handle: DocHandle, customer_id: String) {
             lowest_number > our_number
         });
         if entered_cs {
-            println!("Entered critical section.");
             return;
         }
     }
@@ -187,16 +184,36 @@ async fn run_bakery_algorithm(doc_handle: DocHandle, customer_id: String) {
 async fn acknowlegde_changes(doc_handle: DocHandle, customer_id: String) {
     let handle = Handle::current();
     handle.spawn(async move {
-        let mut changed = doc_handle.changed();
+        let (mut our_view, mut output_seen) = doc_handle.with_doc(|doc| {
+            let bakery: Bakery = hydrate(doc).unwrap();
+            let our_info = bakery.customers.get(&customer_id).unwrap();
+            let output_seen = bakery.output_seen.get(&customer_id).unwrap();
+            (our_info.views_of_others.clone(), *output_seen)
+        });
         loop {
-            if changed.await.is_err() {
+            if doc_handle.changed().await.is_err() {
                 // Shutdown.
-                return;
+                break;
             }
-            changed = doc_handle.changed();
-            doc_handle.with_doc_mut(|doc| {
+            let (customers_with_number, new_output): (HashMap<String, u32>, u32) = doc_handle
+                .with_doc(|doc| {
+                    let bakery: Bakery = hydrate(doc).unwrap();
+                    let numbers = bakery
+                        .customers
+                        .iter()
+                        .map(|(id, c)| (id.clone(), c.number))
+                        .collect();
+                    (numbers, bakery.output)
+                });
+
+            // Only change the doc if something needs acknowledgement.
+            if customers_with_number == our_view && output_seen == new_output {
+                continue;
+            }
+
+            (our_view, output_seen) = doc_handle.with_doc_mut(|doc| {
                 let mut bakery: Bakery = hydrate(doc).unwrap();
-                let customers_with_number = bakery
+                let customers_with_number: HashMap<String, u32> = bakery
                     .customers
                     .clone()
                     .iter()
@@ -204,7 +221,7 @@ async fn acknowlegde_changes(doc_handle: DocHandle, customer_id: String) {
                     .collect();
                 let our_info = bakery.customers.get_mut(&customer_id).unwrap();
                 // Ack changes made by others.
-                our_info.views_of_others = customers_with_number;
+                our_info.views_of_others = customers_with_number.clone();
 
                 // Ack any new output.
                 bakery
@@ -214,13 +231,13 @@ async fn acknowlegde_changes(doc_handle: DocHandle, customer_id: String) {
                 let mut tx = doc.transaction();
                 reconcile(&mut tx, &bakery).unwrap();
                 tx.commit();
+                (customers_with_number, bakery.output)
             });
         }
     });
 }
 
 async fn start_outside_the_bakery(doc_handle: DocHandle, customer_id: String) {
-    let mut changed = doc_handle.changed();
     doc_handle.with_doc_mut(|doc| {
         let mut bakery: Bakery = hydrate(doc).unwrap();
         let our_info = bakery.customers.get_mut(&customer_id).unwrap();
@@ -232,11 +249,10 @@ async fn start_outside_the_bakery(doc_handle: DocHandle, customer_id: String) {
 
     // Wait for acks from peers.
     loop {
-        if changed.await.is_err() {
+        if doc_handle.changed().await.is_err() {
             // Shutdown.
-            return;
+            break;
         }
-        changed = doc_handle.changed();
         let synced = doc_handle.with_doc(|doc| {
             let bakery: Bakery = hydrate(doc).unwrap();
             bakery.customers.iter().fold(true, |acc, (_, c)| {

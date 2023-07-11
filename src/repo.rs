@@ -2,7 +2,7 @@ use crate::dochandle::{DocHandle, SharedDocument};
 use crate::interfaces::{DocumentId, RepoId};
 use crate::interfaces::{NetworkError, RepoMessage, Storage, StorageError};
 use automerge::sync::{Message as SyncMessage, State as SyncState, SyncDoc};
-use automerge::Automerge;
+use automerge::{Automerge, ChangeHash};
 use core::pin::Pin;
 use crossbeam_channel::{select, unbounded, Receiver, Sender};
 use futures::future::{BoxFuture, Future};
@@ -191,8 +191,12 @@ pub(crate) enum RepoEvent {
     DocChange(DocumentId),
     /// A document was closed(all doc handles dropped).
     DocClosed(DocumentId),
-    /// Add a new change observer to a document.
-    AddChangeObserver(DocumentId, RepoFutureResolver<Result<(), RepoError>>),
+    /// Add a new change observer to a document, from a given change hash.
+    AddChangeObserver(
+        DocumentId,
+        Vec<ChangeHash>,
+        RepoFutureResolver<Result<(), RepoError>>,
+    ),
     /// Load a document from storage.
     LoadDoc(
         DocumentId,
@@ -216,7 +220,7 @@ impl fmt::Debug for RepoEvent {
             RepoEvent::NewDoc(_, _) => f.write_str("RepoEvent::NewDoc"),
             RepoEvent::DocChange(_) => f.write_str("RepoEvent::DocChange"),
             RepoEvent::DocClosed(_) => f.write_str("RepoEvent::DocClosed"),
-            RepoEvent::AddChangeObserver(_, _) => f.write_str("RepoEvent::AddChangeObserver"),
+            RepoEvent::AddChangeObserver(_, _, _) => f.write_str("RepoEvent::AddChangeObserver"),
             RepoEvent::LoadDoc(_, _) => f.write_str("RepoEvent::LoadDoc"),
             RepoEvent::ListAllDocs(_) => f.write_str("RepoEvent::ListAllDocs"),
             RepoEvent::ConnectRemoteRepo { .. } => f.write_str("RepoEvent::ConnectRemoteRepo"),
@@ -1269,9 +1273,18 @@ impl Repo {
                     &self.repo_id,
                 );
             }
-            RepoEvent::AddChangeObserver(doc_id, observer) => {
+            RepoEvent::AddChangeObserver(doc_id, change_hash, mut observer) => {
                 if let Some(info) = self.documents.get_mut(&doc_id) {
-                    info.change_observers.push(observer);
+                    let current_heads = {
+                        let state = info.document.read();
+                        state.automerge.get_heads()
+                    };
+                    if current_heads == change_hash {
+                        info.change_observers.push(observer);
+                    } else {
+                        // Resolve now if the document hash already changed.
+                        observer.resolve_fut(Ok(()));
+                    }
                 }
             }
             RepoEvent::ConnectRemoteRepo {
