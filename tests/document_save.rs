@@ -108,8 +108,8 @@ fn test_save_on_shutdown() {
 
         tokio::spawn(async move {
             rx.await.unwrap();
-            // Allow storage to save.
-            storage.process_next_result().await;
+            // Allow storage to perform the saves.
+            storage.process_results().await;
         });
 
         // Shut down the repo.
