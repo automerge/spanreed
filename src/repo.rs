@@ -307,7 +307,10 @@ pub(crate) enum DocState {
 impl fmt::Debug for DocState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            DocState::Bootstrap { .. } => f.write_str("DocState::Bootstrap"),
+            DocState::Bootstrap { resolvers, .. } => {
+                let input = format!("DocState::Bootstrap {:?}", resolvers.len());
+                f.write_str(&input)
+            }
             DocState::LoadPending { .. } => f.write_str("DocState::LoadPending"),
             DocState::LocallyCreatedNotEdited => f.write_str("DocState::LocallyCreatedNotEdited"),
             DocState::Sync(_) => f.write_str("DocState::Sync"),
@@ -346,6 +349,17 @@ impl DocState {
             DocState::Sync(_) => true,
             DocState::PendingRemoval(futs) => !futs.is_empty(),
             _ => false,
+        }
+    }
+    
+    fn get_bootstrap_resolvers(&mut self) -> Vec<RepoFutureResolver<Result<DocHandle, RepoError>>> {
+        match self {
+            DocState::Bootstrap { resolvers, .. } => {
+                return mem::take(resolvers);
+            }
+            _ => unreachable!(
+                "Trying to get boostrap resolvers from a document that cannot have any."
+            ),
         }
     }
 
@@ -1105,22 +1119,21 @@ impl Repo {
                 if info.is_boostrapping() {
                     tracing::trace!("adding bootstrapping document");
                     if let Some(existing_info) = self.documents.get_mut(&document_id) {
-                        match existing_info.state {
-                            DocState::Bootstrap {
-                                ref mut resolvers, ..
-                            } => info.state.add_boostrap_resolvers(resolvers),
-                            DocState::Sync(_) => {
-                                existing_info.handle_count.fetch_add(1, Ordering::SeqCst);
-                                let handle = DocHandle::new(
-                                    self.repo_sender.clone(),
-                                    document_id.clone(),
-                                    existing_info.document.clone(),
-                                    existing_info.handle_count.clone(),
-                                    self.repo_id.clone(),
-                                );
-                                info.state.resolve_bootstrap_fut(Ok(handle));
-                            }
-                            _ => info.state.resolve_bootstrap_fut(Err(RepoError::Incorrect)),
+                        if matches!(existing_info.state, DocState::Bootstrap { .. }) {
+                            let mut resolvers = info.state.get_bootstrap_resolvers();
+                            existing_info.state.add_boostrap_resolvers(&mut resolvers);
+                        } else if matches!(existing_info.state, DocState::Sync(_)) {
+                            existing_info.handle_count.fetch_add(1, Ordering::SeqCst);
+                            let handle = DocHandle::new(
+                                self.repo_sender.clone(),
+                                document_id.clone(),
+                                existing_info.document.clone(),
+                                existing_info.handle_count.clone(),
+                                self.repo_id.clone(),
+                            );
+                            info.state.resolve_bootstrap_fut(Ok(handle));
+                        } else {
+                            info.state.resolve_bootstrap_fut(Err(RepoError::Incorrect));
                         }
                         return;
                     } else {
@@ -1363,6 +1376,7 @@ impl Repo {
                         .documents
                         .entry(document_id.clone())
                         .or_insert_with(|| {
+                            println!("Inserting new info");
                             // Note: since the handle count is zero,
                             // the document will not be removed from memory until shutdown.
                             // Perhaps remove this and rely on `request_document` calls.

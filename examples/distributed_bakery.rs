@@ -234,10 +234,6 @@ async fn start_outside_the_bakery(doc_handle: &DocHandle, customer_id: &String) 
 
     // Wait for acks from peers.
     loop {
-        if doc_handle.changed().await.is_err() {
-            // Shutdown.
-            break;
-        }
         let synced = doc_handle.with_doc(|doc| {
             let bakery: Bakery = hydrate(doc).unwrap();
             bakery.customers.iter().fold(true, |acc, (_, c)| {
@@ -252,6 +248,10 @@ async fn start_outside_the_bakery(doc_handle: &DocHandle, customer_id: &String) 
         if synced {
             break;
         }
+        if doc_handle.changed().await.is_err() {
+            // Shutdown.
+            break;
+        }
     }
 }
 
@@ -263,10 +263,6 @@ async fn request_increment(doc_handle: DocHandle, customer_id: String, customers
         .filter(|id| id != &customer_id)
         .collect();
     loop {
-        if doc_handle.changed().await.is_err() {
-            // Shutdown.
-            break;
-        }
         for id in other_customers.iter() {
             sleep(Duration::from_millis(500)).await;
             let url = format!("http://0.0.0.0:300{}/increment", id);
@@ -276,6 +272,10 @@ async fn request_increment(doc_handle: DocHandle, customer_id: String, customers
                 assert!(new > last);
                 last = new;
             }
+        }
+        if doc_handle.changed().await.is_err() {
+            // Shutdown.
+            break;
         }
     }
 }
