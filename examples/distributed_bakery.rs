@@ -37,27 +37,27 @@ async fn get_doc_id(State(state): State<Arc<AppState>>) -> Json<DocumentId> {
 
 async fn increment(State(state): State<Arc<AppState>>) -> Json<u32> {
     // Enter the critical section.
-    run_bakery_algorithm(state.doc_handle.clone(), state.customer_id.clone()).await;
+    run_bakery_algorithm(&state.doc_handle, &state.customer_id).await;
     println!("Entered critical section.");
 
     // Increment the output
-    let output = increment_output(state.doc_handle.clone(), state.customer_id.clone()).await;
+    let output = increment_output(&state.doc_handle, &state.customer_id).await;
     println!("Incremented output to {:?}.", output);
 
     // Exit the critical section.
-    start_outside_the_bakery(state.doc_handle.clone(), state.customer_id.clone()).await;
+    start_outside_the_bakery(&state.doc_handle, &state.customer_id).await;
     println!("Exited critical section.");
 
     Json(output)
 }
 
-async fn increment_output(doc_handle: DocHandle, customer_id: String) -> u32 {
+async fn increment_output(doc_handle: &DocHandle, customer_id: &str) -> u32 {
     let latest = doc_handle.with_doc_mut(|doc| {
         let mut bakery: Bakery = hydrate(doc).unwrap();
         bakery.output += 1;
         bakery
             .output_seen
-            .insert(customer_id.clone(), bakery.output);
+            .insert(customer_id.to_string(), bakery.output);
         let mut tx = doc.transaction();
         reconcile(&mut tx, &bakery).unwrap();
         tx.commit();
@@ -89,7 +89,7 @@ async fn increment_output(doc_handle: DocHandle, customer_id: String) -> u32 {
     latest
 }
 
-async fn run_bakery_algorithm(doc_handle: DocHandle, customer_id: String) {
+async fn run_bakery_algorithm(doc_handle: &DocHandle, customer_id: &String) {
     let our_number = doc_handle.with_doc_mut(|doc| {
         // Pick a number that is higher than all others.
         let mut bakery: Bakery = hydrate(doc).unwrap();
@@ -101,7 +101,7 @@ async fn run_bakery_algorithm(doc_handle: DocHandle, customer_id: String) {
             .collect();
         let highest_number = bakery.customers.values().map(|c| c.number).max().unwrap();
         let our_number = highest_number + 1;
-        let our_info = bakery.customers.get_mut(&customer_id).unwrap();
+        let our_info = bakery.customers.get_mut(customer_id).unwrap();
         our_info.views_of_others = customers_with_number;
         our_info.number = our_number;
         let mut tx = doc.transaction();
@@ -122,12 +122,12 @@ async fn run_bakery_algorithm(doc_handle: DocHandle, customer_id: String) {
             let acked_by_all = bakery
                 .customers
                 .iter()
-                .filter(|(id, _)| id != &&customer_id)
+                .filter(|(id, _)| id != &customer_id)
                 .fold(true, |acc, (_, c)| {
                     if !acc {
                         acc
                     } else {
-                        let view_of_our_number = c.views_of_others.get(&customer_id).unwrap();
+                        let view_of_our_number = c.views_of_others.get(customer_id).unwrap();
                         view_of_our_number == &our_number
                     }
                 });
@@ -141,7 +141,7 @@ async fn run_bakery_algorithm(doc_handle: DocHandle, customer_id: String) {
                 .customers
                 .iter()
                 .filter_map(|(id, c)| {
-                    if c.number == 0 || id == &customer_id {
+                    if c.number == 0 || id == customer_id {
                         None
                     } else {
                         Some((id, c.number))
@@ -158,7 +158,7 @@ async fn run_bakery_algorithm(doc_handle: DocHandle, customer_id: String) {
 
             if lowest_number == our_number {
                 // Break tie by customer id.
-                return &customer_id < id;
+                return customer_id < id;
             }
 
             lowest_number > our_number
@@ -222,10 +222,10 @@ async fn acknowlegde_changes(doc_handle: DocHandle, customer_id: String) {
     }
 }
 
-async fn start_outside_the_bakery(doc_handle: DocHandle, customer_id: String) {
+async fn start_outside_the_bakery(doc_handle: &DocHandle, customer_id: &String) {
     doc_handle.with_doc_mut(|doc| {
         let mut bakery: Bakery = hydrate(doc).unwrap();
-        let our_info = bakery.customers.get_mut(&customer_id).unwrap();
+        let our_info = bakery.customers.get_mut(customer_id).unwrap();
         our_info.number = 0;
         let mut tx = doc.transaction();
         reconcile(&mut tx, &bakery).unwrap();
@@ -244,7 +244,7 @@ async fn start_outside_the_bakery(doc_handle: DocHandle, customer_id: String) {
                 if !acc {
                     acc
                 } else {
-                    let view_of_our_number = c.views_of_others.get(&customer_id).unwrap();
+                    let view_of_our_number = c.views_of_others.get(customer_id).unwrap();
                     view_of_our_number == &0
                 }
             })
@@ -343,7 +343,7 @@ async fn main() {
         for customer_id in customers.clone() {
             let customer = Customer {
                 // Start with anything but 0,
-                // so that peers block on acks 
+                // so that peers block on acks
                 // until all others are up and running.
                 number: u32::MAX,
                 views_of_others: customers
@@ -400,7 +400,7 @@ async fn main() {
     handle.spawn(async move {
         // Start the algorithm "outside the bakery".
         // The acks makes this wait for all others to be up and running.
-        start_outside_the_bakery(doc_handle_clone.clone(), customer_id.clone()).await;
+        start_outside_the_bakery(&doc_handle_clone, &customer_id).await;
 
         // Continuously requests a new increment.
         request_increment(doc_handle_clone, customer_id, customers).await;
