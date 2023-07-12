@@ -1369,7 +1369,10 @@ impl Repo {
                             let shared_document = SharedDocument {
                                 automerge: new_document(),
                             };
-                            let state = DocState::Sync(vec![]);
+                            let state = DocState::Bootstrap {
+                                resolvers: vec![],
+                                storage_fut: None,
+                            };
                             let document = Arc::new(RwLock::new(shared_document));
                             let handle_count = Arc::new(AtomicUsize::new(0));
                             DocumentInfo::new(state, document, handle_count)
