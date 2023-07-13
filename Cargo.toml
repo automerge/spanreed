@@ -5,17 +5,16 @@ edition = "2021"
 
 [[example]]
 name = "tcp-example"
-path = "examples/tcp_example.rs"
+path = "examples/tcp-example.rs"
 required-features = ["tokio"]
 
 [[test]]
 name = "interop"
-required-features = ["tokio"]
+required-features = ["tokio-tungstenite"]
 
 [features]
-tokio = ["dep:tokio", "dep:tokio-util", "dep:tokio-tungstenite", "dep:tungstenite"]
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+tokio = ["dep:tokio", "dep:tokio-util"]
+tokio-tungstenite = ["tokio", "dep:tokio-tungstenite", "dep:tungstenite"]
 
 [dependencies]
 automerge = { version = "0.4.1" }
