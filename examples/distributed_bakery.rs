@@ -53,10 +53,7 @@ async fn increment_output(doc_handle: &DocHandle, customer_id: &str) -> u32 {
 
         // Perform reads outside of closure,
         // to avoid holding read lock.
-        let bakery = doc_handle.with_doc(|doc| {
-            let bakery: Bakery = hydrate(doc).unwrap();
-            bakery
-        });
+        let bakery: Bakery = doc_handle.with_doc(|doc| hydrate(doc).unwrap());
         let acked_by_all =
             bakery.output_seen.values().fold(
                 true,
@@ -104,10 +101,7 @@ async fn run_bakery_algorithm(doc_handle: &DocHandle, customer_id: &String) {
 
         // Perform reads outside of closure,
         // to avoid holding read lock.
-        let bakery = doc_handle.with_doc(|doc| {
-            let bakery: Bakery = hydrate(doc).unwrap();
-            bakery
-        });
+        let bakery: Bakery = doc_handle.with_doc(|doc| hydrate(doc).unwrap());
 
         // Wait for all peers to have acknowlegded our number.
         let acked_by_all = bakery
@@ -177,11 +171,7 @@ async fn acknowlegde_changes(doc_handle: DocHandle, customer_id: String) {
 
         // Perform reads outside of closure,
         // to avoid holding read lock.
-        let bakery = doc_handle.with_doc(|doc| {
-            let bakery: Bakery = hydrate(doc).unwrap();
-            bakery
-        });
-
+        let bakery: Bakery = doc_handle.with_doc(|doc| hydrate(doc).unwrap());
         let (customers_with_number, new_output): (HashMap<String, u32>, u32) = {
             let numbers = bakery
                 .customers
@@ -235,10 +225,7 @@ async fn start_outside_the_bakery(doc_handle: &DocHandle, customer_id: &String) 
     loop {
         // Perform reads outside of closure,
         // to avoid holding read lock.
-        let bakery = doc_handle.with_doc(|doc| {
-            let bakery: Bakery = hydrate(doc).unwrap();
-            bakery
-        });
+        let bakery: Bakery = doc_handle.with_doc(|doc| hydrate(doc).unwrap());
         let synced = bakery.customers.iter().fold(true, |acc, (_id, c)| {
             if !acc {
                 acc

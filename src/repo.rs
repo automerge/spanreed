@@ -732,17 +732,22 @@ impl DocumentInfo {
             .sync_states
             .entry(repo_id)
             .or_insert_with(SyncState::new);
-        let mut document = self.document.write();
 
-        let start_heads = document.automerge.get_heads();
-        // TODO: remove remote if there is an error.
-        for message in messages {
-            document
-                .automerge
-                .receive_sync_message(sync_state, message)
-                .expect("Failed to apply sync message.");
-        }
-        let new_heads = document.automerge.get_heads();
+        let (start_heads, new_heads) = {
+            let mut document = self.document.write();
+
+            let start_heads = document.automerge.get_heads();
+            // TODO: remove remote if there is an error.
+            for message in messages {
+                document
+                    .automerge
+                    .receive_sync_message(sync_state, message)
+                    .expect("Failed to apply sync message.");
+            }
+            let new_heads = document.automerge.get_heads();
+            (start_heads, new_heads)
+        };
+
         start_heads != new_heads
     }
 
@@ -1360,8 +1365,7 @@ impl Repo {
 
     /// Apply incoming sync messages, and generate outgoing ones.
     fn sync_documents(&mut self) {
-        // Process incoming events.
-        // Handle events.
+        // Re-organize messages so as to acquire the write lock on the document only once per remote.
         let mut per_doc_messages: HashMap<DocumentId, HashMap<RepoId, VecDeque<SyncMessage>>> =
             Default::default();
         for event in mem::take(&mut self.pending_events) {
@@ -1417,12 +1421,15 @@ impl Repo {
                 .get_mut(&document_id)
                 .expect("Doc should have an info by now.");
 
+            let mut doc_changed = false;
             for (from_repo_id, messages) in per_remote {
-                let doc_changed = info.receive_sync_message(from_repo_id, messages);
-                if doc_changed {
-                    info.note_changes();
-                    self.documents_with_changes.push(document_id.clone());
+                if info.receive_sync_message(from_repo_id, messages) {
+                    doc_changed = true;
                 }
+            }
+            if doc_changed {
+                info.note_changes();
+                self.documents_with_changes.push(document_id.clone());
             }
 
             // Note: since receiving and generating sync messages is done

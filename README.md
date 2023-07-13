@@ -19,6 +19,9 @@ Project goal: add an integration layer between automerge and client code, compat
 6. A successful run will print out the expected synced documents. 
 
 ### Distributed Bakery Algorithm
+
+An implementation of the [distributed bakery algorithm](https://lamport.azurewebsites.net/pubs/bakery/dbakery-complete.pdf)
+
 1. Start the bootstap peer:
    - `cargo run --example distributed-bakery --features="tokio" -- --bootstrap --customer-id "1"`
 2. Start two other peers:

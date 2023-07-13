@@ -98,16 +98,18 @@ impl DocHandle {
         F: FnOnce(&mut Automerge) -> T,
     {
         let res = {
-            let mut state = self.shared_document.write();
-            let start_heads = state.automerge.get_heads();
-            let res = f(&mut state.automerge);
-            let new_heads = state.automerge.get_heads();
+            let (start_heads, new_heads, res) = {
+                let mut state = self.shared_document.write();
+                let start_heads = state.automerge.get_heads();
+                let res = f(&mut state.automerge);
+                let new_heads = state.automerge.get_heads();
+                (start_heads, new_heads, res)
+            };
 
             let doc_changed = start_heads != new_heads;
 
             // Always note the last heads seen by the handle,
-            // because sync messages applied
-            // by the backend may have changed it.
+            // for use with `changed`. 
             *self.last_heads.lock() = new_heads;
 
             // If the document wasn't actually mutated,
