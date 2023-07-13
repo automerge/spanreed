@@ -294,7 +294,7 @@ pub(crate) enum DocState {
     LocallyCreatedNotEdited,
     /// The doc is syncing(can be edited locally),
     /// and polling pending storage save operations.
-    Sync(Vec<Option<BoxFuture<'static, Result<(), StorageError>>>>),
+    Sync(Vec<BoxFuture<'static, Result<(), StorageError>>>),
     /// Doc is pending removal,
     /// removal can proceed when the vec of storage futs is empty.
     PendingRemoval(Vec<BoxFuture<'static, Result<(), StorageError>>>),
@@ -483,13 +483,11 @@ impl DocState {
                     return;
                 }
                 let to_poll = mem::take(storage_futs);
-                let mut new: Vec<
-                    Box<dyn Future<Output = Result<(), StorageError>> + Send + Unpin>,
-                > = to_poll
+                let mut new = to_poll
                     .into_iter()
                     .filter_map(|mut storage_fut| {
                         let waker = waker_ref(&waker);
-                        let pinned = Pin::new(&mut *storage_fut);
+                        let pinned = Pin::new(&mut storage_fut);
                         match pinned.poll(&mut Context::from_waker(&waker)) {
                             Poll::Ready(Ok(_)) => None,
                             Poll::Ready(Err(_)) => {
@@ -512,7 +510,7 @@ impl DocState {
                     .into_iter()
                     .filter_map(|mut storage_fut| {
                         let waker = waker_ref(&waker);
-                        let pinned = Pin::new(&mut *storage_fut);
+                        let pinned = Pin::new(&mut storage_fut);
                         let res = match pinned.poll(&mut Context::from_waker(&waker)) {
                             Poll::Ready(Ok(_)) => None,
                             Poll::Ready(Err(_)) => {
@@ -1407,9 +1405,7 @@ impl Repo {
                     let per_doc = per_doc_messages
                         .entry(document_id)
                         .or_insert_with(Default::default);
-                    let per_remote = per_doc
-                        .entry(from_repo_id)
-                        .or_insert_with(Default::default);
+                    let per_remote = per_doc.entry(from_repo_id).or_insert_with(Default::default);
                     per_remote.push_back(message.clone());
                 }
             }

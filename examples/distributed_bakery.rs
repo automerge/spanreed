@@ -1,9 +1,10 @@
-use automerge_repo::{ConnDirection, DocHandle, DocumentId, Repo, Storage};
+use automerge_repo::{ConnDirection, DocHandle, DocumentId, Repo, Storage, StorageError};
 use autosurgeon::{hydrate, reconcile, Hydrate, Reconcile};
 use axum::extract::State;
 use axum::routing::get;
 use axum::{Json, Router};
 use clap::Parser;
+use futures::future::BoxFuture;
 use futures::FutureExt;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -306,7 +307,34 @@ struct Bakery {
 
 struct NoStorage;
 
-impl Storage for NoStorage {}
+impl Storage for NoStorage {
+    fn get<'a>(
+        &self,
+        _id: DocumentId,
+    ) -> BoxFuture<'static, Result<Option<Vec<u8>>, StorageError>> {
+        Box::pin(futures::future::ready(Ok(None)))
+    }
+
+    fn list_all(&self) -> BoxFuture<'static, Result<Vec<DocumentId>, StorageError>> {
+        Box::pin(futures::future::ready(Ok(vec![])))
+    }
+
+    fn append(
+        &self,
+        _id: DocumentId,
+        _changes: Vec<u8>,
+    ) -> BoxFuture<'static, Result<(), StorageError>> {
+        Box::pin(futures::future::ready(Ok(())))
+    }
+
+    fn compact(
+        &self,
+        _id: DocumentId,
+        _full_doc: Vec<u8>,
+    ) -> BoxFuture<'static, Result<(), StorageError>> {
+        Box::pin(futures::future::ready(Ok(())))
+    }
+}
 
 #[tokio::main]
 async fn main() {
