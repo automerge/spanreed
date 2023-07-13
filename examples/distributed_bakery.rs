@@ -261,13 +261,12 @@ async fn request_increment(doc_handle: DocHandle, http_addrs: Vec<String>) {
     let mut last = 0;
     loop {
         for addr in http_addrs.iter() {
-            //sleep(Duration::from_millis(1000)).await;
+            sleep(Duration::from_millis(100)).await;
             let url = format!("http://{}/increment", addr);
             if let Ok(new) = client.get(url).send().await {
                 let new = new.json().await.unwrap();
-                //println!("Got new increment: {:?}, versus old one: {:?}", new, last);
+                println!("Got new increment: {:?}, versus old one: {:?}", new, last);
                 assert!(new > last);
-                println!("Got: {:?} {:?}", new, last);
                 last = new;
             }
         }

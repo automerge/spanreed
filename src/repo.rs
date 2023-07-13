@@ -729,7 +729,7 @@ impl DocumentInfo {
 
     /// Apply incoming sync messages,
     /// returns whether the document changed due to applying the message.
-    fn receive_sync_message(&mut self, repo_id: RepoId, message: SyncMessage) -> bool {
+    fn receive_sync_message(&mut self, repo_id: RepoId, messages: VecDeque<SyncMessage>) -> bool {
         let sync_state = self
             .sync_states
             .entry(repo_id)
@@ -738,10 +738,12 @@ impl DocumentInfo {
 
         let start_heads = document.automerge.get_heads();
         // TODO: remove remote if there is an error.
-        document
-            .automerge
-            .receive_sync_message(sync_state, message)
-            .expect("Failed to apply sync message.");
+        for message in messages {
+            document
+                .automerge
+                .receive_sync_message(sync_state, message)
+                .expect("Failed to apply sync message.");
+        }
         let new_heads = document.automerge.get_heads();
         start_heads != new_heads
     }
@@ -1362,15 +1364,19 @@ impl Repo {
     fn sync_documents(&mut self) {
         // Process incoming events.
         // Handle events.
+        let mut per_doc_messages: HashMap<DocumentId, HashMap<RepoId, VecDeque<SyncMessage>>> =
+            Default::default();
         for event in mem::take(&mut self.pending_events) {
             tracing::trace!(repo_id = ?self.repo_id, message = ?event, "processing sync message");
             match event {
                 NetworkEvent::Sync {
                     from_repo_id,
-                    to_repo_id: local_repo_id,
+                    to_repo_id,
                     document_id,
                     message,
                 } => {
+                    assert_eq!(to_repo_id, self.repo_id);
+
                     // If we don't know about the document,
                     // create a new sync state and start syncing.
                     // Note: this is the mirror of sending sync messages for
@@ -1398,46 +1404,63 @@ impl Repo {
                         continue;
                     }
 
-                    let doc_changed = info.receive_sync_message(from_repo_id, message);
-                    if doc_changed {
-                        info.note_changes();
-                        self.documents_with_changes.push(document_id.clone());
-                    }
-
-                    // Note: since receiving and generating sync messages is done
-                    // in two separate critical sections,
-                    // local changes could be made in between those,
-                    // which is a good thing(generated messages will include those changes).
-                    let mut ready = true;
-                    for (to_repo_id, message) in info.generate_sync_messages().into_iter() {
-                        if message.heads.is_empty() && !message.need.is_empty() {
-                            ready = false;
-                        }
-                        let outgoing = NetworkMessage::Sync {
-                            from_repo_id: local_repo_id.clone(),
-                            to_repo_id: to_repo_id.clone(),
-                            document_id: document_id.clone(),
-                            message,
-                        };
-                        self.pending_messages
-                            .entry(to_repo_id.clone())
-                            .or_insert_with(Default::default)
-                            .push_back(outgoing);
-                        self.sinks_to_poll.insert(to_repo_id);
-                    }
-                    if ready && info.state.is_bootstrapping() {
-                        info.handle_count.fetch_add(1, Ordering::SeqCst);
-                        let handle = DocHandle::new(
-                            self.repo_sender.clone(),
-                            document_id.clone(),
-                            info.document.clone(),
-                            info.handle_count.clone(),
-                            self.repo_id.clone(),
-                        );
-                        info.state.resolve_bootstrap_fut(Ok(handle));
-                        info.state = DocState::Sync(vec![]);
-                    }
+                    let per_doc = per_doc_messages
+                        .entry(document_id)
+                        .or_insert_with(Default::default);
+                    let per_remote = per_doc
+                        .entry(from_repo_id)
+                        .or_insert_with(Default::default);
+                    per_remote.push_back(message.clone());
                 }
+            }
+        }
+
+        for (document_id, per_remote) in per_doc_messages {
+            let info = self
+                .documents
+                .get_mut(&document_id)
+                .expect("Doc should have an info by now.");
+
+            for (from_repo_id, messages) in per_remote {
+                let doc_changed = info.receive_sync_message(from_repo_id, messages);
+                if doc_changed {
+                    info.note_changes();
+                    self.documents_with_changes.push(document_id.clone());
+                }
+            }
+
+            // Note: since receiving and generating sync messages is done
+            // in two separate critical sections,
+            // local changes could be made in between those,
+            // which is a good thing(generated messages will include those changes).
+            let mut ready = true;
+            for (to_repo_id, message) in info.generate_sync_messages().into_iter() {
+                if message.heads.is_empty() && !message.need.is_empty() {
+                    ready = false;
+                }
+                let outgoing = NetworkMessage::Sync {
+                    from_repo_id: self.repo_id.clone(),
+                    to_repo_id: to_repo_id.clone(),
+                    document_id: document_id.clone(),
+                    message,
+                };
+                self.pending_messages
+                    .entry(to_repo_id.clone())
+                    .or_insert_with(Default::default)
+                    .push_back(outgoing);
+                self.sinks_to_poll.insert(to_repo_id);
+            }
+            if ready && info.state.is_bootstrapping() {
+                info.handle_count.fetch_add(1, Ordering::SeqCst);
+                let handle = DocHandle::new(
+                    self.repo_sender.clone(),
+                    document_id.clone(),
+                    info.document.clone(),
+                    info.handle_count.clone(),
+                    self.repo_id.clone(),
+                );
+                info.state.resolve_bootstrap_fut(Ok(handle));
+                info.state = DocState::Sync(vec![]);
             }
         }
     }
