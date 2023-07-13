@@ -3,6 +3,7 @@ extern crate test_utils;
 use automerge::transaction::Transactable;
 use automerge_repo::{Repo, RepoMessage};
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 use test_utils::network_utils::Network;
 use test_utils::storage_utils::SimpleStorage;
 use tokio::sync::mpsc::channel;
@@ -36,7 +37,7 @@ fn test_sinks_closed_on_shutdown() {
     let mut peers = HashMap::new();
     let (sender, mut network_receiver) = channel(1);
     let network_1 = Network::new(sender.clone());
-    let network_2 = Network::new(sender.clone());
+    let network_2 = Network::new(sender);
     repo_handle_1.new_remote_repo(
         repo_handle_2.get_repo_id().clone(),
         Box::new(network_1.clone()),
@@ -103,9 +104,24 @@ fn test_sinks_closed_on_shutdown() {
 
     done_sync_receiver.blocking_recv().unwrap();
 
-    // Stop the repos.
-    repo_handle_1.stop().unwrap();
-    repo_handle_2.stop().unwrap();
+    let stopping = std::thread::spawn(|| {
+        // Stop the repos.
+        repo_handle_1.stop().unwrap();
+        repo_handle_2.stop().unwrap();
+    });
+
+    let stop_started = Instant::now();
+    loop {
+        if stopping.is_finished() {
+            break;
+        }
+        if stop_started.elapsed().as_secs() > 5 {
+            panic!("Repo stop timed out.");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    stopping.join().unwrap();
 
     // Assert all sinks were closed on shutdown.
     assert!(!peers_clone.is_empty());
@@ -143,7 +159,7 @@ fn test_sinks_closed_on_replacement() {
     let mut peers = HashMap::new();
     let (sender, mut network_receiver) = channel(1);
     let network_1 = Network::new(sender.clone());
-    let network_2 = Network::new(sender.clone());
+    let network_2 = Network::new(sender);
     repo_handle_1.new_remote_repo(
         repo_handle_2.get_repo_id().clone(),
         Box::new(network_1.clone()),
@@ -213,7 +229,7 @@ fn test_sinks_closed_on_replacement() {
     // Replace the peers.
     let (sender, mut network_receiver) = channel(1);
     let network_1 = Network::new(sender.clone());
-    let network_2 = Network::new(sender.clone());
+    let network_2 = Network::new(sender);
     repo_handle_1.new_remote_repo(
         repo_handle_2.get_repo_id().clone(),
         Box::new(network_1.clone()),
@@ -320,7 +336,7 @@ fn test_streams_chained_on_replacement() {
     let mut peers = HashMap::new();
     let (sender, mut network_receiver) = channel(1);
     let network_1 = Network::new(sender.clone());
-    let network_2 = Network::new(sender.clone());
+    let network_2 = Network::new(sender);
     repo_handle_1.new_remote_repo(
         repo_handle_2.get_repo_id().clone(),
         Box::new(network_1.clone()),
@@ -397,12 +413,12 @@ fn test_streams_chained_on_replacement() {
     repo_handle_1.new_remote_repo(
         repo_handle_2.get_repo_id().clone(),
         Box::new(network_1.clone()),
-        Box::new(network_1.clone()),
+        Box::new(network_1),
     );
     repo_handle_2.new_remote_repo(
         repo_handle_1.get_repo_id().clone(),
         Box::new(network_2.clone()),
-        Box::new(network_2.clone()),
+        Box::new(network_2),
     );
 
     // Start routing messages

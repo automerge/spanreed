@@ -40,7 +40,7 @@ fn test_requesting_document_connected_peers() {
     let mut peers = HashMap::new();
     let (sender, mut network_receiver) = channel(1);
     let network_1 = Network::new(sender.clone());
-    let network_2 = Network::new(sender.clone());
+    let network_2 = Network::new(sender);
     repo_handle_1.new_remote_repo(
         repo_handle_2.get_repo_id().clone(),
         Box::new(network_1.clone()),
@@ -162,7 +162,7 @@ fn test_requesting_document_unconnected_peers() {
     let mut peers = HashMap::new();
     let (sender, mut network_receiver) = channel(1);
     let network_1 = Network::new(sender.clone());
-    let network_2 = Network::new(sender.clone());
+    let network_2 = Network::new(sender);
     repo_handle_1.new_remote_repo(
         repo_handle_2.get_repo_id().clone(),
         Box::new(network_1.clone()),

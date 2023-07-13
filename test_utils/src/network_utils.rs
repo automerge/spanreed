@@ -48,7 +48,7 @@ impl<T> Network<T> {
         }
         message
     }
-    
+
     pub fn closed(&self) -> bool {
         *self.closed.lock()
     }
@@ -79,10 +79,7 @@ impl Sink<RepoMessage> for Network<RepoMessage> {
             Poll::Pending
         }
     }
-    fn start_send(
-        self: Pin<&mut Self>,
-        item: RepoMessage,
-    ) -> Result<(), Self::Error> {
+    fn start_send(self: Pin<&mut Self>, item: RepoMessage) -> Result<(), Self::Error> {
         let (from_repo_id, to_repo_id) = match &item {
             RepoMessage::Sync {
                 from_repo_id,

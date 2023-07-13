@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -eou pipefail
+
+./scripts/ci/fmt
+./scripts/ci/clippy
+./scripts/ci/deny
+./scripts/ci/build-test
+./scripts/ci/rust-docs

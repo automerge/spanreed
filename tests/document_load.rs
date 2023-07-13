@@ -40,7 +40,7 @@ fn test_loading_document_found_immediately() {
     repo_handle.stop().unwrap();
 
     // Create another repo.
-    let repo = Repo::new(None, Box::new(storage.clone()));
+    let repo = Repo::new(None, Box::new(storage));
     let repo_handle = repo.run();
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -57,7 +57,7 @@ fn test_loading_document_found_immediately() {
                 .get(automerge::ROOT, "repo_id")
                 .expect("Failed to read the document.")
                 .unwrap();
-            val.0.to_str().clone().unwrap() == format!("{}", expected_repo_id)
+            val.0.to_str().unwrap() == format!("{}", expected_repo_id)
         });
         if equals {
             done_sync_sender.send(()).await.unwrap();
@@ -73,7 +73,7 @@ fn test_loading_document_found_immediately() {
 fn test_loading_document_found_async() {
     let storage = InMemoryStorage::default();
     // Create one repo.
-    let repo = Repo::new(None, Box::new(storage.clone()));
+    let repo = Repo::new(None, Box::new(storage));
     let repo_handle = repo.run();
 
     // Create a document for one repo.
@@ -126,7 +126,7 @@ fn test_loading_document_found_async() {
                         .get(automerge::ROOT, "repo_id")
                         .expect("Failed to read the document.")
                         .unwrap();
-                    val.0.to_str().clone().unwrap() == format!("{}", expected_repo_id)
+                    val.0.to_str().unwrap() == format!("{}", expected_repo_id)
                 });
             if equals {
                 // Shut down the repo.
@@ -150,7 +150,7 @@ fn test_loading_document_immediately_not_found() {
     let storage = InMemoryStorage::default();
 
     // Create a repo.
-    let repo = Repo::new(None, Box::new(storage.clone()));
+    let repo = Repo::new(None, Box::new(storage));
     let repo_handle = repo.run();
 
     let rt = tokio::runtime::Builder::new_multi_thread()

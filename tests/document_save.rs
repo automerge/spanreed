@@ -59,7 +59,7 @@ fn test_simple_save() {
                     .get(automerge::ROOT, "repo_id")
                     .expect("Failed to read the document.")
                     .unwrap();
-                val.0.to_str().clone().unwrap() == expected_value
+                val.0.to_str().unwrap() == expected_value
             });
         if equals {
             // Shut down the repo.
@@ -192,7 +192,7 @@ fn test_multiple_save() {
                     .get(automerge::ROOT, "repo_id")
                     .expect("Failed to read the document.")
                     .unwrap();
-                val.0.to_str().clone().unwrap() == expected_value
+                val.0.to_str().unwrap() == expected_value
             });
         if equals {
             // Shut down the repo.
@@ -296,7 +296,7 @@ fn test_compact_save() {
                     .get(automerge::ROOT, "repo_id")
                     .expect("Failed to read the document.")
                     .unwrap();
-                val.0.to_str().clone().unwrap() == expected_value
+                val.0.to_str().unwrap() == expected_value
             });
         if equals {
             // Shut down the repo.

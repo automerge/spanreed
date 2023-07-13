@@ -57,16 +57,8 @@ impl Storage for InMemoryStorage {
         futures::future::ready(Ok(self.documents.lock().get(&id).cloned())).boxed()
     }
 
-    fn list_all(
-        &self,
-    ) -> BoxFuture<'static, Result<Vec<DocumentId>, StorageError>> {
-        futures::future::ready(Ok(self
-            .documents
-            .lock()
-            .keys()
-            .cloned()
-            .collect()))
-            .boxed()
+    fn list_all(&self) -> BoxFuture<'static, Result<Vec<DocumentId>, StorageError>> {
+        futures::future::ready(Ok(self.documents.lock().keys().cloned().collect())).boxed()
     }
 
     fn append(
@@ -162,8 +154,9 @@ impl AsyncInMemoryStorage {
                     }
                 }
                 if !with_step || can_send_result {
-                    let sender: OneShot<()> = results.pop_front().unwrap();
-                    let _ = sender.send(());
+                    if let Some(sender) = results.pop_front() {
+                        sender.send(()).unwrap();
+                    }
                 }
             }
         });
@@ -181,10 +174,7 @@ impl AsyncInMemoryStorage {
 }
 
 impl Storage for AsyncInMemoryStorage {
-    fn get(
-        &self,
-        id: DocumentId,
-    ) -> BoxFuture<'static, Result<Option<Vec<u8>>, StorageError>> {
+    fn get(&self, id: DocumentId) -> BoxFuture<'static, Result<Option<Vec<u8>>, StorageError>> {
         let (tx, rx) = oneshot();
         self.chan
             .blocking_send(StorageRequest::Load(id, tx))
@@ -192,9 +182,7 @@ impl Storage for AsyncInMemoryStorage {
         rx.map_err(|_| StorageError::Error).boxed()
     }
 
-    fn list_all(
-        &self,
-    ) -> BoxFuture<'static, Result<Vec<DocumentId>, StorageError>> {
+    fn list_all(&self) -> BoxFuture<'static, Result<Vec<DocumentId>, StorageError>> {
         let (tx, rx) = oneshot();
         self.chan
             .blocking_send(StorageRequest::ListAll(tx))

@@ -96,7 +96,7 @@ fn handle_joinerror<T>(
     result: Result<Result<T, crate::fs_store::Error>, tokio::task::JoinError>,
 ) -> Result<T, Error> {
     match result {
-        Ok(r) => r.map_err(|e| Error::FsStorage(e)),
+        Ok(r) => r.map_err(Error::FsStorage),
         Err(e) => {
             if e.is_panic() {
                 std::panic::resume_unwind(e.into_panic());

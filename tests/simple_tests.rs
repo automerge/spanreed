@@ -116,7 +116,7 @@ fn test_simple_sync() {
                     .request_document(doc_handle.document_id())
                     .await
                     .unwrap();
-                synced = synced + 1;
+                synced += 1;
             }
         }
         assert_eq!(synced, 81);

@@ -27,7 +27,7 @@ fn test_document_changed_over_sync() {
     let mut peers = HashMap::new();
     let (sender, mut network_receiver) = channel(1);
     let network_1 = Network::new(sender.clone());
-    let network_2 = Network::new(sender.clone());
+    let network_2 = Network::new(sender);
     repo_handle_1.new_remote_repo(
         repo_handle_2.get_repo_id().clone(),
         Box::new(network_1.clone()),
@@ -83,7 +83,7 @@ fn test_document_changed_over_sync() {
                     .get(automerge::ROOT, "repo_id")
                     .expect("Failed to read the document.")
                     .unwrap();
-                val.0.to_str().clone().unwrap() == format!("{}", expected_repo_id)
+                val.0.to_str().unwrap() == format!("{}", expected_repo_id)
             });
             if equals {
                 done_sync_sender.send(()).await.unwrap();
@@ -162,7 +162,7 @@ fn test_document_changed_locally() {
                 .get(automerge::ROOT, "repo_id")
                 .expect("Failed to read the document.")
                 .unwrap();
-            assert_eq!(val.0.to_str().clone().unwrap(), format!("{}", expected));
+            assert_eq!(val.0.to_str().unwrap(), format!("{}", expected));
         });
         done_sender.send(()).await.unwrap();
     });

@@ -78,6 +78,7 @@ pub struct AsyncInMemoryStorage {
 }
 
 impl AsyncInMemoryStorage {
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         let mut documents: HashMap<DocumentId, Vec<u8>> = Default::default();
         let (doc_request_sender, mut doc_request_receiver) = channel::<StorageRequest>(1);
@@ -229,7 +230,7 @@ async fn main() {
                         .get(automerge::ROOT, "repo_id")
                         .expect("Failed to read the document.")
                         .unwrap();
-                    let val = val.0.to_str().clone().unwrap();
+                    let val = val.0.to_str().unwrap();
                     println!("Synced: {:?} to {:?}", doc_id, val);
                 });
             }

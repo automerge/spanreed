@@ -26,7 +26,7 @@ fn interop_test() {
 fn sync_two_repos(port: u16) {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async {
-        let storage1 = Box::new(InMemoryStorage::default());
+        let storage1 = Box::<InMemoryStorage>::default();
         let repo1 = Repo::new(None, storage1);
         let repo1_handle = repo1.run();
         let (conn, _) = tokio_tungstenite::connect_async(format!("ws://localhost:{}", port))
@@ -47,7 +47,7 @@ fn sync_two_repos(port: u16) {
             })
             .unwrap();
 
-        let storage2 = Box::new(InMemoryStorage::default());
+        let storage2 = Box::<InMemoryStorage>::default();
         let repo2 = Repo::new(None, storage2);
         let repo2_handle = repo2.run();
 
@@ -123,8 +123,8 @@ fn start_js_server() -> Child {
 
 fn npm_build() {
     println!("npm run build");
-    let mut cmd = std::process::Command::new("/usr/bin/npm");
-    cmd.args(&["run", "build"]);
+    let mut cmd = std::process::Command::new("npm");
+    cmd.args(["run", "build"]);
     cmd.current_dir(interop_server_path());
     let status = cmd.status().expect("npm run build failed");
     assert!(status.success());
@@ -132,7 +132,7 @@ fn npm_build() {
 
 fn npm_install() {
     println!("npm install");
-    let mut cmd = std::process::Command::new("/usr/bin/npm");
+    let mut cmd = std::process::Command::new("npm");
     cmd.arg("install");
     cmd.current_dir(interop_server_path());
     let status = cmd.status().expect("npm install failed");

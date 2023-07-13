@@ -2,7 +2,7 @@ use crate::interfaces::{Message, NetworkError, RepoId, RepoMessage};
 use crate::repo::RepoHandle;
 use futures::{Sink, SinkExt, Stream, StreamExt};
 
-/// Which direction a connection passed to [`Repo::connect`] is going
+/// Which direction a connection passed to [`crate::RepoHandle::new_remote_repo`] is going
 pub enum ConnDirection {
     Incoming,
     Outgoing,

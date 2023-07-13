@@ -177,13 +177,11 @@ impl FsStore {
         // Remove all the old data
         for incremental in chunks.incrementals.keys() {
             let path = paths.chunk_path(&self.root, incremental);
-            std::fs::remove_file(&path)
-                .map_err(|e| Error(ErrorKind::DeleteChunk(path.into(), e)))?;
+            std::fs::remove_file(&path).map_err(|e| Error(ErrorKind::DeleteChunk(path, e)))?;
         }
         for snapshot in chunks.snapshots.keys() {
             let path = paths.chunk_path(&self.root, snapshot);
-            std::fs::remove_file(&path)
-                .map_err(|e| Error(ErrorKind::DeleteChunk(path.into(), e)))?;
+            std::fs::remove_file(&path).map_err(|e| Error(ErrorKind::DeleteChunk(path, e)))?;
         }
         Ok(())
     }
@@ -211,13 +209,8 @@ fn write_chunk(
     // Move the temporary file into a snapshot in the document data directory
     // with a name based on the hash of the heads of the document
     let output_path = paths.chunk_path(root, &name);
-    std::fs::rename(&temp_save_path, &output_path).map_err(|e| {
-        Error(ErrorKind::RenameTempFile(
-            temp_save_path.into(),
-            output_path.into(),
-            e,
-        ))
-    })?;
+    std::fs::rename(&temp_save_path, &output_path)
+        .map_err(|e| Error(ErrorKind::RenameTempFile(temp_save_path, output_path, e)))?;
 
     Ok(())
 }
@@ -261,18 +254,18 @@ impl DocIdPaths {
     }
 
     /// The first level of the directory hierarchy, i.e.
-    ///     <root>/<first two bytes of SHA256 hash of document ID>
+    ///     `<root>/<first two bytes of SHA256 hash of document ID>`
     fn level1_path<P: AsRef<Path>>(&self, root: P) -> std::path::PathBuf {
         let mut path = root.as_ref().to_path_buf();
-        path.push(hex::encode(&self.prefix));
+        path.push(hex::encode(self.prefix));
         path
     }
 
     /// The second level of the directory hierarchy, i.e.
-    ///     <root>/<first two bytes of SHA256 hash of document ID>/<hex encoded bytes of document ID>
+    ///     `<root>/<first two bytes of SHA256 hash of document ID>/<hex encoded bytes of document ID>`
     fn level2_path<P: AsRef<Path>>(&self, root: P) -> std::path::PathBuf {
         let mut path = self.level1_path(root);
-        path.push(hex::encode(&self.doc_id.as_ref().to_vec()));
+        path.push(hex::encode(self.doc_id.as_ref()));
         path
     }
 
@@ -349,7 +342,7 @@ struct Chunks {
 impl Chunks {
     fn load(root: &Path, doc_id: &DocumentId) -> Result<Option<Self>, Error> {
         let doc_id_hash = DocIdPaths::from(doc_id);
-        let level2_path = doc_id_hash.level2_path(&root);
+        let level2_path = doc_id_hash.level2_path(root);
         tracing::debug!(
             root=%root.display(),
             doc_id=?doc_id,
@@ -427,10 +420,10 @@ impl Chunks {
 
     fn to_doc(&self) -> Result<automerge::Automerge, automerge::AutomergeError> {
         let mut bytes = Vec::new();
-        for (_, chunk) in &self.snapshots {
+        for chunk in self.snapshots.values() {
             bytes.extend(chunk);
         }
-        for (_, chunk) in &self.incrementals {
+        for chunk in self.incrementals.values() {
             bytes.extend(chunk);
         }
         automerge::Automerge::load(&bytes)

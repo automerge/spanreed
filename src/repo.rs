@@ -768,7 +768,7 @@ enum RepoWaker {
     StorageList(Sender<WakeSignal>),
 }
 
-/// https://docs.rs/futures/latest/futures/task/trait.ArcWake.html
+/// <https://docs.rs/futures/latest/futures/task/trait.ArcWake.html>
 impl ArcWake for RepoWaker {
     fn wake_by_ref(arc_self: &Arc<Self>) {
         // Ignore errors,
