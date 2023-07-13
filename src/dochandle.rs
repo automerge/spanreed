@@ -99,10 +99,25 @@ impl DocHandle {
     {
         let res = {
             let mut state = self.shared_document.write();
+            let start_heads = state.automerge.get_heads();
             let res = f(&mut state.automerge);
-            *self.last_heads.lock() = state.automerge.get_heads();
+            let new_heads = state.automerge.get_heads();
+
+            let doc_changed = start_heads != new_heads;
+
+            // Always note the last heads seen by the handle,
+            // because sync messages applied
+            // by the backend may have changed it.
+            *self.last_heads.lock() = new_heads;
+
+            // If the document wasn't actually mutated,
+            // there is no need to send an event.
+            if !doc_changed {
+                return res;
+            }
             res
         };
+
         self.repo_sender
             .send(RepoEvent::DocChange(self.document_id.clone()))
             .expect("Failed to send doc change event.");

@@ -19,9 +19,9 @@ Project goal: add an integration layer between automerge and client code, compat
 6. A successful run will print out the expected synced documents. 
 
 ### Distributed Bakery Algorithm
-1. Start the server:
-   - `cargo run --example distributed-bakery --features="tokio" -- --tcp-run-ip 127.0.0.1:2345 --http-run-ip 0.0.0.0:3001 --customer-id "1"`
-2. Start two clients:
-   - `cargo run --example distributed-bakery --features="tokio" -- --other-ip 127.0.0.1:2345 --get-doc-ip 0.0.0.0:3001 --http-run-ip 0.0.0.0:3002 --customer-id "2"`
-   - `cargo run --example distributed-bakery --features="tokio" -- --other-ip 127.0.0.1:2345 --get-doc-ip 0.0.0.0:3001 --http-run-ip 0.0.0.0:3003 --customer-id "3"`
+1. Start the bootstap peer:
+   - `cargo run --example distributed-bakery --features="tokio" -- --bootstrap --customer-id "1"`
+2. Start two other peers:
+   - `cargo run --example distributed-bakery --features="tokio" -- --customer-id "2"`
+   - `cargo run --example distributed-bakery --features="tokio" -- --customer-id "3"`
 3. Watch the peers request new increments from each other, and enter/exit their critical sections(printed out).

@@ -11,26 +11,6 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::runtime::Handle;
 use tokio::time::{sleep, Duration};
 
-#[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
-struct Args {
-    #[arg(long)]
-    http_run_ip: String,
-    #[arg(long)]
-    get_doc_ip: Option<String>,
-    #[arg(long)]
-    tcp_run_ip: Option<String>,
-    #[arg(long)]
-    other_ip: Option<String>,
-    #[arg(long)]
-    customer_id: String,
-}
-
-struct AppState {
-    doc_handle: DocHandle,
-    customer_id: String,
-}
-
 async fn get_doc_id(State(state): State<Arc<AppState>>) -> Json<DocumentId> {
     Json(state.doc_handle.document_id())
 }
@@ -69,8 +49,14 @@ async fn increment_output(doc_handle: &DocHandle, customer_id: &str) -> u32 {
             // Shutdown.
             break;
         }
-        let acked_by_all = doc_handle.with_doc(|doc| {
+
+        // Perform reads outside of closure,
+        // to avoid holding read lock.
+        let bakery = doc_handle.with_doc(|doc| {
             let bakery: Bakery = hydrate(doc).unwrap();
+            bakery
+        });
+        let acked_by_all =
             bakery.output_seen.values().fold(
                 true,
                 |acc, output| {
@@ -80,8 +66,7 @@ async fn increment_output(doc_handle: &DocHandle, customer_id: &str) -> u32 {
                         output == &latest
                     }
                 },
-            )
-        });
+            );
         if acked_by_all {
             break;
         }
@@ -115,55 +100,62 @@ async fn run_bakery_algorithm(doc_handle: &DocHandle, customer_id: &String) {
             // Shutdown.
             break;
         }
-        let entered_cs = doc_handle.with_doc(|doc| {
+
+        // Perform reads outside of closure,
+        // to avoid holding read lock.
+        let bakery = doc_handle.with_doc(|doc| {
             let bakery: Bakery = hydrate(doc).unwrap();
-
-            // Wait for all peers to have acknowlegded our number.
-            let acked_by_all = bakery
-                .customers
-                .iter()
-                .filter(|(id, _)| id != &customer_id)
-                .fold(true, |acc, (_, c)| {
-                    if !acc {
-                        acc
-                    } else {
-                        let view_of_our_number = c.views_of_others.get(customer_id).unwrap();
-                        view_of_our_number == &our_number
-                    }
-                });
-
-            if !acked_by_all {
-                return false;
-            }
-
-            // Lowest non-negative number.
-            let has_lower = bakery
-                .customers
-                .iter()
-                .filter_map(|(id, c)| {
-                    if c.number == 0 || id == customer_id {
-                        None
-                    } else {
-                        Some((id, c.number))
-                    }
-                })
-                .min_by_key(|(_, num)| *num);
-
-            // Everyone else is at zero.
-            if has_lower.is_none() {
-                return true;
-            }
-
-            let (id, lowest_number) = has_lower.unwrap();
-
-            if lowest_number == our_number {
-                // Break tie by customer id.
-                return customer_id < id;
-            }
-
-            lowest_number > our_number
+            bakery
         });
-        if entered_cs {
+
+        // Wait for all peers to have acknowlegded our number.
+        let acked_by_all = bakery
+            .customers
+            .iter()
+            .filter(|(id, _)| id != &customer_id)
+            .fold(true, |acc, (_, c)| {
+                if !acc {
+                    acc
+                } else {
+                    let view_of_our_number = c.views_of_others.get(customer_id).unwrap();
+                    view_of_our_number == &our_number
+                }
+            });
+
+        if !acked_by_all {
+            continue;
+        }
+
+        // Lowest non-negative number.
+        let has_lower = bakery
+            .customers
+            .iter()
+            .filter_map(|(id, c)| {
+                if c.number == 0 || id == customer_id {
+                    None
+                } else {
+                    Some((id, c.number))
+                }
+            })
+            .min_by_key(|(_, num)| *num);
+
+        // Everyone else is at zero.
+        if has_lower.is_none() {
+            return;
+        }
+
+        let (id, lowest_number) = has_lower.unwrap();
+
+        if lowest_number == our_number {
+            // Break tie by customer id.
+            if customer_id < id {
+                return;
+            } else {
+                continue;
+            }
+        }
+
+        if lowest_number > our_number {
             return;
         }
     }
@@ -181,16 +173,22 @@ async fn acknowlegde_changes(doc_handle: DocHandle, customer_id: String) {
             // Shutdown.
             break;
         }
-        let (customers_with_number, new_output): (HashMap<String, u32>, u32) =
-            doc_handle.with_doc(|doc| {
-                let bakery: Bakery = hydrate(doc).unwrap();
-                let numbers = bakery
-                    .customers
-                    .iter()
-                    .map(|(id, c)| (id.clone(), c.number))
-                    .collect();
-                (numbers, bakery.output)
-            });
+
+        // Perform reads outside of closure,
+        // to avoid holding read lock.
+        let bakery = doc_handle.with_doc(|doc| {
+            let bakery: Bakery = hydrate(doc).unwrap();
+            bakery
+        });
+
+        let (customers_with_number, new_output): (HashMap<String, u32>, u32) = {
+            let numbers = bakery
+                .customers
+                .iter()
+                .map(|(id, c)| (id.clone(), c.number))
+                .collect();
+            (numbers, bakery.output)
+        };
 
         // Only change the doc if something needs acknowledgement.
         if customers_with_number == our_view && output_seen == new_output {
@@ -234,16 +232,19 @@ async fn start_outside_the_bakery(doc_handle: &DocHandle, customer_id: &String) 
 
     // Wait for acks from peers.
     loop {
-        let synced = doc_handle.with_doc(|doc| {
+        // Perform reads outside of closure,
+        // to avoid holding read lock.
+        let bakery = doc_handle.with_doc(|doc| {
             let bakery: Bakery = hydrate(doc).unwrap();
-            bakery.customers.iter().fold(true, |acc, (_, c)| {
-                if !acc {
-                    acc
-                } else {
-                    let view_of_our_number = c.views_of_others.get(customer_id).unwrap();
-                    view_of_our_number == &0
-                }
-            })
+            bakery
+        });
+        let synced = bakery.customers.iter().fold(true, |acc, (_id, c)| {
+            if !acc {
+                acc
+            } else {
+                let view_of_our_number = c.views_of_others.get(customer_id).unwrap();
+                view_of_our_number == &0
+            }
         });
         if synced {
             break;
@@ -255,21 +256,18 @@ async fn start_outside_the_bakery(doc_handle: &DocHandle, customer_id: &String) 
     }
 }
 
-async fn request_increment(doc_handle: DocHandle, customer_id: String, customers: Vec<String>) {
+async fn request_increment(doc_handle: DocHandle, http_addrs: Vec<String>) {
     let client = reqwest::Client::new();
     let mut last = 0;
-    let other_customers: Vec<String> = customers
-        .into_iter()
-        .filter(|id| id != &customer_id)
-        .collect();
     loop {
-        for id in other_customers.iter() {
-            sleep(Duration::from_millis(500)).await;
-            let url = format!("http://0.0.0.0:300{}/increment", id);
+        for addr in http_addrs.iter() {
+            //sleep(Duration::from_millis(1000)).await;
+            let url = format!("http://{}/increment", addr);
             if let Ok(new) = client.get(url).send().await {
                 let new = new.json().await.unwrap();
-                println!("Got new increment: {:?}, versus old one: {:?}", new, last);
+                //println!("Got new increment: {:?}, versus old one: {:?}", new, last);
                 assert!(new > last);
+                println!("Got: {:?} {:?}", new, last);
                 last = new;
             }
         }
@@ -278,6 +276,20 @@ async fn request_increment(doc_handle: DocHandle, customer_id: String, customers
             break;
         }
     }
+}
+
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    #[arg(long)]
+    bootstrap: bool,
+    #[arg(long)]
+    customer_id: String,
+}
+
+struct AppState {
+    doc_handle: DocHandle,
+    customer_id: String,
 }
 
 #[derive(Debug, Clone, Reconcile, Hydrate, PartialEq)]
@@ -300,40 +312,73 @@ impl Storage for NoStorage {}
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
-    let run_ip = args.tcp_run_ip;
-    let http_ip = args.http_run_ip;
-    let other_ip = args.other_ip;
-    let get_doc_ip = args.get_doc_ip;
+    let bootstrap = args.bootstrap;
+    let customer_id = args.customer_id.clone();
+    let handle = Handle::current();
 
-    // Hardcoded customer Ids.
+    // All customers, including ourself.
     let customers: Vec<String> = vec!["1", "2", "3"]
         .into_iter()
         .map(|id| id.to_string())
         .collect();
 
+    // Addrs of peers.
+    let http_addrs: Vec<String> = customers
+        .iter()
+        .filter(|id| id != &&args.customer_id)
+        .map(|id| format!("0.0.0.0:300{}", id))
+        .collect();
+    let tcp_addrs: Vec<String> = customers
+        .iter()
+        .filter(|id| id != &&args.customer_id)
+        .map(|id| format!("127.0.0.1:234{}", id))
+        .collect();
+
+    // Our addrs
+    let our_http_addr = format!("0.0.0.0:300{}", customer_id);
+    let our_tcp_addr = format!("127.0.0.1:234{}", customer_id);
+
     // Create a repo.
     let repo = Repo::new(None, Box::new(NoStorage));
     let repo_handle = repo.run();
 
-    let handle = Handle::current();
-    let doc_handle = if let Some(run_ip) = run_ip {
-        // Start a server.
-        let repo_clone = repo_handle.clone();
-        handle.spawn(async move {
-            let listener = TcpListener::bind(run_ip).await.unwrap();
-            loop {
-                match listener.accept().await {
-                    Ok((socket, addr)) => {
-                        repo_clone
-                            .connect_tokio_io(addr, socket, ConnDirection::Incoming)
-                            .await
-                            .unwrap();
-                    }
-                    Err(e) => println!("couldn't get client: {:?}", e),
+    // Start a tcp server.
+    let repo_clone = repo_handle.clone();
+    handle.spawn(async move {
+        let listener = TcpListener::bind(our_tcp_addr).await.unwrap();
+        loop {
+            match listener.accept().await {
+                Ok((socket, addr)) => {
+                    repo_clone
+                        .connect_tokio_io(addr, socket, ConnDirection::Incoming)
+                        .await
+                        .unwrap();
                 }
+                Err(e) => println!("couldn't get client: {:?}", e),
             }
-        });
+        }
+    });
 
+    // Connect to the other peers.
+    let repo_clone = repo_handle.clone();
+    handle.spawn(async move {
+        for addr in tcp_addrs {
+            let stream = loop {
+                let res = TcpStream::connect(addr.clone()).await;
+                if res.is_err() {
+                    sleep(Duration::from_millis(1000)).await;
+                    continue;
+                }
+                break res.unwrap();
+            };
+            repo_clone
+                .connect_tokio_io(addr, stream, ConnDirection::Outgoing)
+                .await
+                .unwrap();
+        }
+    });
+
+    let doc_handle = if bootstrap {
         // The initial bakery.
         let mut bakery: Bakery = Bakery {
             output: 0,
@@ -356,66 +401,64 @@ async fn main() {
             bakery.output_seen.insert(customer_id.to_string(), 0);
         }
 
-        // Create the initial document.
+        // The initial document.
         let doc_handle = repo_handle.new_document();
         doc_handle.with_doc_mut(|doc| {
             let mut tx = doc.transaction();
             reconcile(&mut tx, &bakery).unwrap();
             tx.commit();
         });
+
         doc_handle
     } else {
-        // Connect to a remote.
-        let other_ip = other_ip.unwrap();
-        let stream = loop {
-            // Try to connect to a peer
-            let res = TcpStream::connect(other_ip.clone()).await;
+        // Get the id of the shared document.
+        let client = reqwest::Client::new();
+        let mut doc_id = None;
+        for addr in http_addrs.iter() {
+            let url = format!("http://{}/get_doc_id", addr);
+            let res = client.get(url).send().await;
             if res.is_err() {
                 continue;
             }
-            break res.unwrap();
-        };
-        repo_handle
-            .connect_tokio_io(other_ip, stream, ConnDirection::Outgoing)
-            .await
-            .unwrap();
-
-        // Get the shared document id.
-        let client = reqwest::Client::new();
-        let url = format!("http://{}/get_doc_id", get_doc_ip.unwrap());
-        let doc_id = client.get(url).send().await.unwrap().json().await.unwrap();
-
+            let data = res.unwrap().json().await;
+            if data.is_err() {
+                continue;
+            }
+            doc_id = Some(data.unwrap());
+            break;
+        }
+        assert!(doc_id.is_some());
         // Get the document.
-        repo_handle.request_document(doc_id).await.unwrap()
+        repo_handle.request_document(doc_id.unwrap()).await.unwrap()
     };
 
     let app_state = Arc::new(AppState {
         doc_handle: doc_handle.clone(),
-        customer_id: args.customer_id.clone(),
+        customer_id: customer_id.clone(),
     });
 
-    // Do this in a task, so that the server immediatly starts running.
-    let customer_id = args.customer_id.clone();
+    // Do the below in a task, so that the server immediatly starts running.
+    let customer_id_clone = customer_id.clone();
     let doc_handle_clone = doc_handle.clone();
     handle.spawn(async move {
         // Start the algorithm "outside the bakery".
         // The acks makes this wait for all others to be up and running.
-        start_outside_the_bakery(&doc_handle_clone, &customer_id).await;
+        start_outside_the_bakery(&doc_handle_clone, &customer_id_clone).await;
 
-        // Continuously requests a new increment.
-        request_increment(doc_handle_clone, customer_id, customers).await;
+        // Continuously request new increments.
+        request_increment(doc_handle_clone, http_addrs).await;
     });
 
     // A task that continuously acknowledges changes made by others.
     handle.spawn(async move {
-        acknowlegde_changes(doc_handle, args.customer_id.clone()).await;
+        acknowlegde_changes(doc_handle, customer_id).await;
     });
 
     let app = Router::new()
         .route("/get_doc_id", get(get_doc_id))
         .route("/increment", get(increment))
         .with_state(app_state);
-    let serve = axum::Server::bind(&http_ip.parse().unwrap()).serve(app.into_make_service());
+    let serve = axum::Server::bind(&our_http_addr.parse().unwrap()).serve(app.into_make_service());
     tokio::select! {
         _ = serve.fuse() => {},
         _ = tokio::signal::ctrl_c().fuse() => {

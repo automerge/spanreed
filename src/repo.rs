@@ -351,12 +351,10 @@ impl DocState {
             _ => false,
         }
     }
-    
+
     fn get_bootstrap_resolvers(&mut self) -> Vec<RepoFutureResolver<Result<DocHandle, RepoError>>> {
         match self {
-            DocState::Bootstrap { resolvers, .. } => {
-                return mem::take(resolvers);
-            }
+            DocState::Bootstrap { resolvers, .. } => mem::take(resolvers),
             _ => unreachable!(
                 "Trying to get boostrap resolvers from a document that cannot have any."
             ),
@@ -729,18 +727,23 @@ impl DocumentInfo {
         self.patches_since_last_save = 0;
     }
 
-    /// Apply incoming sync messages.
-    fn receive_sync_message(&mut self, repo_id: RepoId, message: SyncMessage) {
+    /// Apply incoming sync messages,
+    /// returns whether the document changed due to applying the message.
+    fn receive_sync_message(&mut self, repo_id: RepoId, message: SyncMessage) -> bool {
         let sync_state = self
             .sync_states
             .entry(repo_id)
             .or_insert_with(SyncState::new);
         let mut document = self.document.write();
+
+        let start_heads = document.automerge.get_heads();
         // TODO: remove remote if there is an error.
         document
             .automerge
             .receive_sync_message(sync_state, message)
             .expect("Failed to apply sync message.");
+        let new_heads = document.automerge.get_heads();
+        start_heads != new_heads
     }
 
     /// Potentially generate an outgoing sync message.
@@ -1376,7 +1379,6 @@ impl Repo {
                         .documents
                         .entry(document_id.clone())
                         .or_insert_with(|| {
-                            println!("Inserting new info");
                             // Note: since the handle count is zero,
                             // the document will not be removed from memory until shutdown.
                             // Perhaps remove this and rely on `request_document` calls.
@@ -1396,11 +1398,11 @@ impl Repo {
                         continue;
                     }
 
-                    info.receive_sync_message(from_repo_id, message);
-
-                    // TODO: only continue if applying the sync message changed the doc.
-                    info.note_changes();
-                    self.documents_with_changes.push(document_id.clone());
+                    let doc_changed = info.receive_sync_message(from_repo_id, message);
+                    if doc_changed {
+                        info.note_changes();
+                        self.documents_with_changes.push(document_id.clone());
+                    }
 
                     // Note: since receiving and generating sync messages is done
                     // in two separate critical sections,
