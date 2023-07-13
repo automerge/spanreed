@@ -17,3 +17,14 @@ Project goal: add an integration layer between automerge and client code, compat
    - `curl --json '{document-id}' 0.0.0.0:3002/request_doc`(document id argument should look like`'"f9b1a2c6-ca05-4fc7-a02f-7e3d83f1bb49"'`)
 5. Presss ctr-c at every terminal tab.
 6. A successful run will print out the expected synced documents. 
+
+### Distributed Bakery Algorithm
+
+An implementation of the [distributed bakery algorithm](https://lamport.azurewebsites.net/pubs/bakery/dbakery-complete.pdf)
+
+1. Start the bootstap peer:
+   - `cargo run --example distributed-bakery --features="tokio" -- --bootstrap --customer-id "1"`
+2. Start two other peers:
+   - `cargo run --example distributed-bakery --features="tokio" -- --customer-id "2"`
+   - `cargo run --example distributed-bakery --features="tokio" -- --customer-id "3"`
+3. Watch the peers request new increments from each other, and enter/exit their critical sections(printed out).

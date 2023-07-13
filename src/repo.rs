@@ -2,7 +2,7 @@ use crate::dochandle::{DocHandle, SharedDocument};
 use crate::interfaces::{DocumentId, RepoId};
 use crate::interfaces::{NetworkError, RepoMessage, Storage, StorageError};
 use automerge::sync::{Message as SyncMessage, State as SyncState, SyncDoc};
-use automerge::Automerge;
+use automerge::{Automerge, ChangeHash};
 use core::pin::Pin;
 use crossbeam_channel::{select, unbounded, Receiver, Sender};
 use futures::future::{BoxFuture, Future};
@@ -191,8 +191,12 @@ pub(crate) enum RepoEvent {
     DocChange(DocumentId),
     /// A document was closed(all doc handles dropped).
     DocClosed(DocumentId),
-    /// Add a new change observer to a document.
-    AddChangeObserver(DocumentId, RepoFutureResolver<Result<(), RepoError>>),
+    /// Add a new change observer to a document, from a given change hash.
+    AddChangeObserver(
+        DocumentId,
+        Vec<ChangeHash>,
+        RepoFutureResolver<Result<(), RepoError>>,
+    ),
     /// Load a document from storage.
     LoadDoc(
         DocumentId,
@@ -216,7 +220,7 @@ impl fmt::Debug for RepoEvent {
             RepoEvent::NewDoc(_, _) => f.write_str("RepoEvent::NewDoc"),
             RepoEvent::DocChange(_) => f.write_str("RepoEvent::DocChange"),
             RepoEvent::DocClosed(_) => f.write_str("RepoEvent::DocClosed"),
-            RepoEvent::AddChangeObserver(_, _) => f.write_str("RepoEvent::AddChangeObserver"),
+            RepoEvent::AddChangeObserver(_, _, _) => f.write_str("RepoEvent::AddChangeObserver"),
             RepoEvent::LoadDoc(_, _) => f.write_str("RepoEvent::LoadDoc"),
             RepoEvent::ListAllDocs(_) => f.write_str("RepoEvent::ListAllDocs"),
             RepoEvent::ConnectRemoteRepo { .. } => f.write_str("RepoEvent::ConnectRemoteRepo"),
@@ -289,16 +293,11 @@ pub(crate) enum DocState {
     /// until it has been locally edited.
     LocallyCreatedNotEdited,
     /// The doc is syncing(can be edited locally),
-    /// and polling an optional future representing
-    /// a pending storage save operation.
-    Sync(Option<BoxFuture<'static, Result<(), StorageError>>>),
+    /// and polling pending storage save operations.
+    Sync(Vec<BoxFuture<'static, Result<(), StorageError>>>),
     /// Doc is pending removal,
-    /// removal can proceed when storage fut is none,
-    /// and edit count is zero.
-    PendingRemoval {
-        storage_fut: Option<BoxFuture<'static, Result<(), StorageError>>>,
-        pending_edits: usize,
-    },
+    /// removal can proceed when the vec of storage futs is empty.
+    PendingRemoval(Vec<BoxFuture<'static, Result<(), StorageError>>>),
     /// The document is in a corrupted state,
     /// prune it from memory.
     /// TODO: prune it from storage as well?
@@ -308,11 +307,14 @@ pub(crate) enum DocState {
 impl fmt::Debug for DocState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            DocState::Bootstrap { .. } => f.write_str("DocState::Bootstrap"),
+            DocState::Bootstrap { resolvers, .. } => {
+                let input = format!("DocState::Bootstrap {:?}", resolvers.len());
+                f.write_str(&input)
+            }
             DocState::LoadPending { .. } => f.write_str("DocState::LoadPending"),
             DocState::LocallyCreatedNotEdited => f.write_str("DocState::LocallyCreatedNotEdited"),
             DocState::Sync(_) => f.write_str("DocState::Sync"),
-            DocState::PendingRemoval { .. } => f.write_str("DocState::PendingRemoval"),
+            DocState::PendingRemoval(_) => f.write_str("DocState::PendingRemoval"),
             DocState::Error => f.write_str("DocState::Error"),
         }
     }
@@ -343,14 +345,20 @@ impl DocState {
     }
 
     fn should_save(&self) -> bool {
-        matches!(self, DocState::Sync(None))
-            || matches!(
-                self,
-                DocState::PendingRemoval {
-                    storage_fut: None,
-                    pending_edits: 1..,
-                }
-            )
+        match self {
+            DocState::Sync(_) => true,
+            DocState::PendingRemoval(futs) => !futs.is_empty(),
+            _ => false,
+        }
+    }
+
+    fn get_bootstrap_resolvers(&mut self) -> Vec<RepoFutureResolver<Result<DocHandle, RepoError>>> {
+        match self {
+            DocState::Bootstrap { resolvers, .. } => mem::take(resolvers),
+            _ => unreachable!(
+                "Trying to get boostrap resolvers from a document that cannot have any."
+            ),
+        }
     }
 
     fn resolve_bootstrap_fut(&mut self, doc_handle: Result<DocHandle, RepoError>) {
@@ -470,38 +478,52 @@ impl DocState {
     fn poll_pending_save(&mut self, waker: Arc<RepoWaker>) {
         assert!(matches!(*waker, RepoWaker::Storage { .. }));
         match self {
-            DocState::Sync(Some(storage_fut)) => {
-                let waker = waker_ref(&waker);
-                let pinned = Pin::new(storage_fut);
-                match pinned.poll(&mut Context::from_waker(&waker)) {
-                    Poll::Ready(Ok(_)) => {
-                        *self = DocState::Sync(None);
-                    }
-                    Poll::Ready(Err(_)) => {
-                        // TODO: propagate error to doc handle.
-                        // `with_doc_mut` could return a future for this.
-                        *self = DocState::Error;
-                    }
-                    Poll::Pending => {}
+            DocState::Sync(ref mut storage_futs) => {
+                if storage_futs.is_empty() {
+                    return;
                 }
+                let to_poll = mem::take(storage_futs);
+                let mut new = to_poll
+                    .into_iter()
+                    .filter_map(|mut storage_fut| {
+                        let waker = waker_ref(&waker);
+                        let pinned = Pin::new(&mut storage_fut);
+                        match pinned.poll(&mut Context::from_waker(&waker)) {
+                            Poll::Ready(Ok(_)) => None,
+                            Poll::Ready(Err(_)) => {
+                                // TODO: propagate error to doc handle.
+                                // `with_doc_mut` could return a future for this.
+                                None
+                            }
+                            Poll::Pending => Some(storage_fut),
+                        }
+                    })
+                    .collect();
+                storage_futs.append(&mut new);
             }
-            DocState::PendingRemoval {
-                storage_fut,
-                pending_edits: _,
-            } => {
-                let waker = waker_ref(&waker);
-                let pinned = Pin::new(storage_fut.as_mut().expect(
-                    "Trying to poll a pending save future for a document that does not have one.",
-                ));
-                match pinned.poll(&mut Context::from_waker(&waker)) {
-                    Poll::Ready(Ok(_)) => {
-                        *storage_fut = None;
-                    }
-                    Poll::Ready(Err(_)) => {
-                        *self = DocState::Error;
-                    }
-                    Poll::Pending => {}
+            DocState::PendingRemoval(ref mut storage_futs) => {
+                if storage_futs.is_empty() {
+                    return;
                 }
+                let to_poll = mem::take(storage_futs);
+                let mut new = to_poll
+                    .into_iter()
+                    .filter_map(|mut storage_fut| {
+                        let waker = waker_ref(&waker);
+                        let pinned = Pin::new(&mut storage_fut);
+                        let res = match pinned.poll(&mut Context::from_waker(&waker)) {
+                            Poll::Ready(Ok(_)) => None,
+                            Poll::Ready(Err(_)) => {
+                                // TODO: propagate error to doc handle.
+                                // `with_doc_mut` could return a future for this.
+                                None
+                            }
+                            Poll::Pending => Some(storage_fut),
+                        };
+                        res
+                    })
+                    .collect();
+                storage_futs.append(&mut new);
             }
             _ => unreachable!(
                 "Trying to poll a pending save future for a document that does not have one."
@@ -559,16 +581,10 @@ impl DocumentInfo {
             | DocState::LoadPending { .. }
             | DocState::Bootstrap { .. } => {
                 assert_eq!(self.patches_since_last_save, 0);
-                DocState::PendingRemoval {
-                    storage_fut: None,
-                    pending_edits: 0,
-                }
+                DocState::PendingRemoval(vec![])
             }
-            DocState::Sync(ref mut storage_fut) => DocState::PendingRemoval {
-                storage_fut: storage_fut.take(),
-                pending_edits: self.patches_since_last_save,
-            },
-            DocState::PendingRemoval { .. } => return,
+            DocState::Sync(ref mut storage_fut) => DocState::PendingRemoval(mem::take(storage_fut)),
+            DocState::PendingRemoval(_) => return,
         }
     }
 
@@ -603,7 +619,7 @@ impl DocumentInfo {
                         repo_id.clone(),
                     );
                     self.state.resolve_load_fut(Ok(Some(handle)));
-                    self.state = DocState::Sync(None);
+                    self.state = DocState::Sync(vec![]);
                     // TODO: send sync messages?
                 }
                 Poll::Ready(Ok(None)) => {
@@ -640,7 +656,7 @@ impl DocumentInfo {
                         repo_id.clone(),
                     );
                     self.state.resolve_bootstrap_fut(Ok(handle));
-                    self.state = DocState::Sync(None);
+                    self.state = DocState::Sync(vec![]);
                     // TODO: send sync messages?
                 }
                 Poll::Ready(Ok(None)) => {
@@ -695,34 +711,44 @@ impl DocumentInfo {
             };
             storage.append(document_id.clone(), to_save)
         };
-        self.state = match self.state {
-            DocState::Sync(None) => DocState::Sync(Some(storage_fut)),
-            DocState::PendingRemoval {
-                storage_fut: None,
-                pending_edits: 1..,
-            } => DocState::PendingRemoval {
-                storage_fut: Some(storage_fut),
-                pending_edits: 0,
-            },
+        match self.state {
+            DocState::Sync(ref mut futs) => {
+                futs.push(storage_fut);
+            }
+            DocState::PendingRemoval(ref mut futs) => {
+                futs.push(storage_fut);
+            }
             _ => unreachable!("Unexpected doc state on save."),
-        };
+        }
         let waker = Arc::new(RepoWaker::Storage(wake_sender.clone(), document_id));
         self.state.poll_pending_save(waker);
         self.patches_since_last_save = 0;
     }
 
-    /// Apply incoming sync messages.
-    fn receive_sync_message(&mut self, repo_id: RepoId, message: SyncMessage) {
+    /// Apply incoming sync messages,
+    /// returns whether the document changed due to applying the message.
+    fn receive_sync_message(&mut self, repo_id: RepoId, messages: VecDeque<SyncMessage>) -> bool {
         let sync_state = self
             .sync_states
             .entry(repo_id)
             .or_insert_with(SyncState::new);
-        let mut document = self.document.write();
-        // TODO: remove remote if there is an error.
-        document
-            .automerge
-            .receive_sync_message(sync_state, message)
-            .expect("Failed to apply sync message.");
+
+        let (start_heads, new_heads) = {
+            let mut document = self.document.write();
+
+            let start_heads = document.automerge.get_heads();
+            // TODO: remove remote if there is an error.
+            for message in messages {
+                document
+                    .automerge
+                    .receive_sync_message(sync_state, message)
+                    .expect("Failed to apply sync message.");
+            }
+            let new_heads = document.automerge.get_heads();
+            (start_heads, new_heads)
+        };
+
+        start_heads != new_heads
     }
 
     /// Potentially generate an outgoing sync message.
@@ -905,20 +931,16 @@ impl Repo {
         let delenda = self
             .documents
             .iter()
-            .filter_map(|(key, info)| {
-                if matches!(info.state, DocState::Error)
-                    || matches!(
-                        info.state,
-                        DocState::PendingRemoval {
-                            storage_fut: None,
-                            pending_edits: 0
-                        }
-                    )
-                {
-                    Some(key.clone())
-                } else {
-                    None
+            .filter_map(|(key, info)| match &info.state {
+                DocState::Error => Some(key.clone()),
+                DocState::PendingRemoval(futs) => {
+                    if futs.is_empty() {
+                        Some(key.clone())
+                    } else {
+                        None
+                    }
                 }
+                _ => None,
             })
             .collect::<Vec<_>>();
         for key in delenda {
@@ -1105,22 +1127,21 @@ impl Repo {
                 if info.is_boostrapping() {
                     tracing::trace!("adding bootstrapping document");
                     if let Some(existing_info) = self.documents.get_mut(&document_id) {
-                        match existing_info.state {
-                            DocState::Bootstrap {
-                                ref mut resolvers, ..
-                            } => info.state.add_boostrap_resolvers(resolvers),
-                            DocState::Sync(_) => {
-                                existing_info.handle_count.fetch_add(1, Ordering::SeqCst);
-                                let handle = DocHandle::new(
-                                    self.repo_sender.clone(),
-                                    document_id.clone(),
-                                    existing_info.document.clone(),
-                                    existing_info.handle_count.clone(),
-                                    self.repo_id.clone(),
-                                );
-                                info.state.resolve_bootstrap_fut(Ok(handle));
-                            }
-                            _ => info.state.resolve_bootstrap_fut(Err(RepoError::Incorrect)),
+                        if matches!(existing_info.state, DocState::Bootstrap { .. }) {
+                            let mut resolvers = info.state.get_bootstrap_resolvers();
+                            existing_info.state.add_boostrap_resolvers(&mut resolvers);
+                        } else if matches!(existing_info.state, DocState::Sync(_)) {
+                            existing_info.handle_count.fetch_add(1, Ordering::SeqCst);
+                            let handle = DocHandle::new(
+                                self.repo_sender.clone(),
+                                document_id.clone(),
+                                existing_info.document.clone(),
+                                existing_info.handle_count.clone(),
+                                self.repo_id.clone(),
+                            );
+                            info.state.resolve_bootstrap_fut(Ok(handle));
+                        } else {
+                            info.state.resolve_bootstrap_fut(Err(RepoError::Incorrect));
                         }
                         return;
                     } else {
@@ -1165,8 +1186,10 @@ impl Repo {
                         // Stop here if the document wasn't actually changed.
                         return;
                     }
-                    let should_announce = matches!(info.state, DocState::LocallyCreatedNotEdited);
-                    info.state = DocState::Sync(None);
+                    let is_first_edit = matches!(info.state, DocState::LocallyCreatedNotEdited);
+                    if is_first_edit {
+                        info.state = DocState::Sync(vec![]);
+                    }
                     self.documents_with_changes.push(doc_id.clone());
                     for (to_repo_id, message) in info.generate_sync_messages().into_iter() {
                         let outgoing = NetworkMessage::Sync {
@@ -1181,7 +1204,7 @@ impl Repo {
                             .push_back(outgoing);
                         self.sinks_to_poll.insert(to_repo_id);
                     }
-                    if should_announce {
+                    if is_first_edit {
                         // Send a sync message to all other repos we are connected with.
                         for repo_id in self.remote_repos.keys() {
                             if let Some(message) = info.generate_first_sync_message(repo_id.clone())
@@ -1269,9 +1292,18 @@ impl Repo {
                     &self.repo_id,
                 );
             }
-            RepoEvent::AddChangeObserver(doc_id, observer) => {
+            RepoEvent::AddChangeObserver(doc_id, change_hash, mut observer) => {
                 if let Some(info) = self.documents.get_mut(&doc_id) {
-                    info.change_observers.push(observer);
+                    let current_heads = {
+                        let state = info.document.read();
+                        state.automerge.get_heads()
+                    };
+                    if current_heads == change_hash {
+                        info.change_observers.push(observer);
+                    } else {
+                        // Resolve now if the document hash already changed.
+                        observer.resolve_fut(Ok(()));
+                    }
                 }
             }
             RepoEvent::ConnectRemoteRepo {
@@ -1333,17 +1365,20 @@ impl Repo {
 
     /// Apply incoming sync messages, and generate outgoing ones.
     fn sync_documents(&mut self) {
-        // Process incoming events.
-        // Handle events.
+        // Re-organize messages so as to acquire the write lock on the document only once per remote.
+        let mut per_doc_messages: HashMap<DocumentId, HashMap<RepoId, VecDeque<SyncMessage>>> =
+            Default::default();
         for event in mem::take(&mut self.pending_events) {
             tracing::trace!(repo_id = ?self.repo_id, message = ?event, "processing sync message");
             match event {
                 NetworkEvent::Sync {
                     from_repo_id,
-                    to_repo_id: local_repo_id,
+                    to_repo_id,
                     document_id,
                     message,
                 } => {
+                    assert_eq!(to_repo_id, self.repo_id);
+
                     // If we don't know about the document,
                     // create a new sync state and start syncing.
                     // Note: this is the mirror of sending sync messages for
@@ -1358,7 +1393,10 @@ impl Repo {
                             let shared_document = SharedDocument {
                                 automerge: new_document(),
                             };
-                            let state = DocState::Sync(None);
+                            let state = DocState::Bootstrap {
+                                resolvers: vec![],
+                                storage_fut: None,
+                            };
                             let document = Arc::new(RwLock::new(shared_document));
                             let handle_count = Arc::new(AtomicUsize::new(0));
                             DocumentInfo::new(state, document, handle_count)
@@ -1368,46 +1406,64 @@ impl Repo {
                         continue;
                     }
 
-                    info.receive_sync_message(from_repo_id, message);
-
-                    // TODO: only continue if applying the sync message changed the doc.
-                    info.note_changes();
-                    self.documents_with_changes.push(document_id.clone());
-
-                    // Note: since receiving and generating sync messages is done
-                    // in two separate critical sections,
-                    // local changes could be made in between those,
-                    // which is a good thing(generated messages will include those changes).
-                    let mut ready = true;
-                    for (to_repo_id, message) in info.generate_sync_messages().into_iter() {
-                        if message.heads.is_empty() && !message.need.is_empty() {
-                            ready = false;
-                        }
-                        let outgoing = NetworkMessage::Sync {
-                            from_repo_id: local_repo_id.clone(),
-                            to_repo_id: to_repo_id.clone(),
-                            document_id: document_id.clone(),
-                            message,
-                        };
-                        self.pending_messages
-                            .entry(to_repo_id.clone())
-                            .or_insert_with(Default::default)
-                            .push_back(outgoing);
-                        self.sinks_to_poll.insert(to_repo_id);
-                    }
-                    if ready && info.state.is_bootstrapping() {
-                        info.handle_count.fetch_add(1, Ordering::SeqCst);
-                        let handle = DocHandle::new(
-                            self.repo_sender.clone(),
-                            document_id.clone(),
-                            info.document.clone(),
-                            info.handle_count.clone(),
-                            self.repo_id.clone(),
-                        );
-                        info.state.resolve_bootstrap_fut(Ok(handle));
-                        info.state = DocState::Sync(None);
-                    }
+                    let per_doc = per_doc_messages
+                        .entry(document_id)
+                        .or_insert_with(Default::default);
+                    let per_remote = per_doc.entry(from_repo_id).or_insert_with(Default::default);
+                    per_remote.push_back(message.clone());
                 }
+            }
+        }
+
+        for (document_id, per_remote) in per_doc_messages {
+            let info = self
+                .documents
+                .get_mut(&document_id)
+                .expect("Doc should have an info by now.");
+
+            let mut doc_changed = false;
+            for (from_repo_id, messages) in per_remote {
+                if info.receive_sync_message(from_repo_id, messages) {
+                    doc_changed = true;
+                }
+            }
+            if doc_changed {
+                info.note_changes();
+                self.documents_with_changes.push(document_id.clone());
+            }
+
+            // Note: since receiving and generating sync messages is done
+            // in two separate critical sections,
+            // local changes could be made in between those,
+            // which is a good thing(generated messages will include those changes).
+            let mut ready = true;
+            for (to_repo_id, message) in info.generate_sync_messages().into_iter() {
+                if message.heads.is_empty() && !message.need.is_empty() {
+                    ready = false;
+                }
+                let outgoing = NetworkMessage::Sync {
+                    from_repo_id: self.repo_id.clone(),
+                    to_repo_id: to_repo_id.clone(),
+                    document_id: document_id.clone(),
+                    message,
+                };
+                self.pending_messages
+                    .entry(to_repo_id.clone())
+                    .or_insert_with(Default::default)
+                    .push_back(outgoing);
+                self.sinks_to_poll.insert(to_repo_id);
+            }
+            if ready && info.state.is_bootstrapping() {
+                info.handle_count.fetch_add(1, Ordering::SeqCst);
+                let handle = DocHandle::new(
+                    self.repo_sender.clone(),
+                    document_id.clone(),
+                    info.document.clone(),
+                    info.handle_count.clone(),
+                    self.repo_id.clone(),
+                );
+                info.state.resolve_bootstrap_fut(Ok(handle));
+                info.state = DocState::Sync(vec![]);
             }
         }
     }
@@ -1521,10 +1577,14 @@ impl Repo {
             // Error all futures for all docs,
             // start to save them,
             // and mark them as pending removal.
-            for (doc_id, info) in self.documents.iter_mut() {
+            for doc_id in mem::take(&mut self.documents_with_changes) {
+                if let Some(info) = self.documents.get_mut(&doc_id) {
+                    info.resolve_change_observers(Err(RepoError::Shutdown));
+                    info.save_document(doc_id.clone(), self.storage.as_ref(), &self.wake_sender);
+                }
+            }
+            for (_, info) in self.documents.iter_mut() {
                 info.state.resolve_any_fut_for_shutdown();
-                info.resolve_change_observers(Err(RepoError::Shutdown));
-                info.save_document(doc_id.clone(), self.storage.as_ref(), &self.wake_sender);
                 info.start_pending_removal();
             }
 
@@ -1548,11 +1608,6 @@ impl Repo {
             // Ensure all docs are saved,
             // and all network sinks are closed.
             loop {
-                for (doc_id, info) in self.documents.iter_mut() {
-                    // Save docs again, in case they had a pending save, and pending edits.
-                    info.save_document(doc_id.clone(), self.storage.as_ref(), &self.wake_sender);
-                }
-
                 // Remove docs that have been saved, or that errored.
                 self.gc_docs();
 

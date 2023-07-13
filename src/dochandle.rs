@@ -1,8 +1,8 @@
 use crate::interfaces::{DocumentId, RepoId};
 use crate::repo::{new_repo_future_with_resolver, RepoError, RepoEvent, RepoFuture};
-use automerge::Automerge;
+use automerge::{Automerge, ChangeHash};
 use crossbeam_channel::Sender;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -23,6 +23,12 @@ pub struct DocHandle {
     repo_sender: Sender<RepoEvent>,
     document_id: DocumentId,
     local_repo_id: RepoId,
+    /// The change hash corresponding to either
+    /// the creation of the doc,
+    /// or the last time it was access by any of the `with_doc` methods.
+    /// Putting it in a mutex to maintain an API
+    /// that doesn't require a mutabale reference to the handle.
+    last_heads: Mutex<Vec<ChangeHash>>,
 }
 
 impl Clone for DocHandle {
@@ -61,12 +67,17 @@ impl DocHandle {
         handle_count: Arc<AtomicUsize>,
         local_repo_id: RepoId,
     ) -> Self {
+        let last_heads = {
+            let state = shared_document.read();
+            state.automerge.get_heads()
+        };
         DocHandle {
             shared_document,
             repo_sender,
             document_id,
             handle_count,
             local_repo_id,
+            last_heads: Mutex::new(last_heads),
         }
     }
 
@@ -87,9 +98,28 @@ impl DocHandle {
         F: FnOnce(&mut Automerge) -> T,
     {
         let res = {
-            let mut state = self.shared_document.write();
-            f(&mut state.automerge)
+            let (start_heads, new_heads, res) = {
+                let mut state = self.shared_document.write();
+                let start_heads = state.automerge.get_heads();
+                let res = f(&mut state.automerge);
+                let new_heads = state.automerge.get_heads();
+                (start_heads, new_heads, res)
+            };
+
+            let doc_changed = start_heads != new_heads;
+
+            // Always note the last heads seen by the handle,
+            // for use with `changed`. 
+            *self.last_heads.lock() = new_heads;
+
+            // If the document wasn't actually mutated,
+            // there is no need to send an event.
+            if !doc_changed {
+                return res;
+            }
+            res
         };
+
         self.repo_sender
             .send(RepoEvent::DocChange(self.document_id.clone()))
             .expect("Failed to send doc change event.");
@@ -102,10 +132,9 @@ impl DocHandle {
     where
         F: FnOnce(&Automerge) -> T,
     {
-        let res = {
-            let state = self.shared_document.read();
-            f(&state.automerge)
-        };
+        let state = self.shared_document.read();
+        let res = f(&state.automerge);
+        *self.last_heads.lock() = state.automerge.get_heads();
         res
     }
 
@@ -118,6 +147,7 @@ impl DocHandle {
         self.repo_sender
             .send(RepoEvent::AddChangeObserver(
                 self.document_id.clone(),
+                self.last_heads.lock().clone(),
                 observer,
             ))
             .expect("Failed to send doc change event.");
