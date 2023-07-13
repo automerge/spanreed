@@ -123,7 +123,7 @@ fn start_js_server() -> Child {
 
 fn npm_build() {
     println!("npm run build");
-    let mut cmd = std::process::Command::new("/usr/bin/npm");
+    let mut cmd = std::process::Command::new("npm");
     cmd.args(&["run", "build"]);
     cmd.current_dir(interop_server_path());
     let status = cmd.status().expect("npm run build failed");
@@ -132,7 +132,7 @@ fn npm_build() {
 
 fn npm_install() {
     println!("npm install");
-    let mut cmd = std::process::Command::new("/usr/bin/npm");
+    let mut cmd = std::process::Command::new("npm");
     cmd.arg("install");
     cmd.current_dir(interop_server_path());
     let status = cmd.status().expect("npm install failed");

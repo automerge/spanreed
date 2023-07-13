@@ -31,6 +31,7 @@ impl RepoHandle {
         Ok(())
     }
 
+    #[cfg(feature = "tokio-tungstenite")]
     pub async fn connect_tungstenite<S>(
         &self,
         stream: S,
@@ -118,7 +119,6 @@ impl Decoder for Codec {
     }
 }
 
-#[cfg(feature = "tokio")]
 impl Encoder<Message> for Codec {
     type Error = CodecError;
 
